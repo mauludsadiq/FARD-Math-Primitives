@@ -684,6 +684,203 @@ pub fn recompute_leaf_digest(receipt: &ArithmeticStepReceipt) -> Digest {
 }
 
 
+// ── Phase 1: Canonical Decode Enforcement ────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DecodeError {
+    WrongTag { expected: u8, got: u8 },
+    UnexpectedEof,
+    NonMinimalEncoding,
+    InvalidSignByte(u8),
+    NegativeZero,
+    ZeroWithNonzeroSign,
+    ZeroDenominator,
+    UnreducedRational,
+    AlternateZeroRational,
+    TrailingBytes,
+    LengthMismatch { expected: usize, got: usize },
+}
+
+impl fmt::Display for DecodeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
+// decode_nat
+// Accepts: [0x01, u32_be_len, mag_bytes...]
+// Rejects: wrong tag, truncated, non-minimal (leading zero), trailing bytes
+pub fn decode_nat(bytes: &[u8]) -> Result<NatWitness, DecodeError> {
+    if bytes.is_empty() {
+        return Err(DecodeError::UnexpectedEof);
+    }
+    if bytes[0] != 0x01 {
+        return Err(DecodeError::WrongTag { expected: 0x01, got: bytes[0] });
+    }
+    if bytes.len() < 5 {
+        return Err(DecodeError::UnexpectedEof);
+    }
+    let len = u32::from_be_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]) as usize;
+    if bytes.len() < 5 + len {
+        return Err(DecodeError::LengthMismatch { expected: 5 + len, got: bytes.len() });
+    }
+    if bytes.len() > 5 + len {
+        return Err(DecodeError::TrailingBytes);
+    }
+    let mag = &bytes[5..5 + len];
+
+    // Non-minimal: leading zero byte in nonzero magnitude
+    if len > 0 && mag[0] == 0x00 {
+        return Err(DecodeError::NonMinimalEncoding);
+    }
+
+    // Reconstruct value
+    let mut value: u64 = 0;
+    for &b in mag {
+        value = value.checked_shl(8)
+            .ok_or(DecodeError::NonMinimalEncoding)?
+            .checked_add(b as u64)
+            .ok_or(DecodeError::NonMinimalEncoding)?;
+    }
+
+    let witness = NatWitness::new(value);
+
+    // Round-trip check
+    if witness.canon != bytes {
+        return Err(DecodeError::NonMinimalEncoding);
+    }
+
+    Ok(witness)
+}
+
+// decode_int
+// Accepts: [0x02, sign_byte, nat_canon...]
+// Rejects: wrong tag, bad sign byte, negative zero, zero with nonzero sign
+pub fn decode_int(bytes: &[u8]) -> Result<IntWitness, DecodeError> {
+    if bytes.is_empty() {
+        return Err(DecodeError::UnexpectedEof);
+    }
+    if bytes[0] != 0x02 {
+        return Err(DecodeError::WrongTag { expected: 0x02, got: bytes[0] });
+    }
+    if bytes.len() < 2 {
+        return Err(DecodeError::UnexpectedEof);
+    }
+    let sign_byte = bytes[1];
+    let sign = match sign_byte {
+        0x00 => Sign::Zero,
+        0x01 => Sign::Positive,
+        0x02 => Sign::Negative,
+        other => return Err(DecodeError::InvalidSignByte(other)),
+    };
+
+    let nat = decode_nat(&bytes[2..])?;
+
+    // Negative zero
+    if matches!(sign, Sign::Negative) && nat.extent == 0 {
+        return Err(DecodeError::NegativeZero);
+    }
+    // Zero with nonzero sign
+    if nat.extent == 0 && !matches!(sign, Sign::Zero) {
+        return Err(DecodeError::ZeroWithNonzeroSign);
+    }
+    // Nonzero magnitude with zero sign
+    if nat.extent != 0 && matches!(sign, Sign::Zero) {
+        return Err(DecodeError::ZeroWithNonzeroSign);
+    }
+
+    let witness = IntWitness::new(match sign {
+        Sign::Zero => 0,
+        Sign::Positive => nat.extent as i64,
+        Sign::Negative => (nat.extent as i64).wrapping_neg(),
+    });
+
+    // Round-trip check
+    if witness.canon != bytes {
+        return Err(DecodeError::NonMinimalEncoding);
+    }
+
+    Ok(witness)
+}
+
+// decode_rat
+// Accepts: [0x03, int_canon..., nat_canon...]
+// Rejects: wrong tag, zero denominator, unreduced, alternate zero forms
+pub fn decode_rat(bytes: &[u8]) -> Result<RatWitness, DecodeError> {
+    if bytes.is_empty() {
+        return Err(DecodeError::UnexpectedEof);
+    }
+    if bytes[0] != 0x03 {
+        return Err(DecodeError::WrongTag { expected: 0x03, got: bytes[0] });
+    }
+    if bytes.len() < 2 {
+        return Err(DecodeError::UnexpectedEof);
+    }
+
+    // Parse embedded int (starts at byte 1)
+    // Int is: [0x02, sign, 0x01, u32_len, mag...]
+    // Need to find where int ends and nat begins
+    let int_bytes = find_int_slice(&bytes[1..])?;
+    let num = decode_int(int_bytes)?;
+
+    let nat_start = 1 + int_bytes.len();
+    if nat_start >= bytes.len() {
+        return Err(DecodeError::UnexpectedEof);
+    }
+    let nat_bytes = &bytes[nat_start..];
+    let den = decode_nat(nat_bytes)?;
+
+    // Zero denominator
+    if den.extent == 0 {
+        return Err(DecodeError::ZeroDenominator);
+    }
+
+    // Alternate zero rational: if num is zero, den must be 1
+    if num.value() == 0 && den.extent != 1 {
+        return Err(DecodeError::AlternateZeroRational);
+    }
+
+    // Must be reduced
+    let g = gcd_u64(num.magnitude.extent, den.extent);
+    if g > 1 {
+        return Err(DecodeError::UnreducedRational);
+    }
+
+    let witness = RatWitness::new(num.value(), den.extent)
+        .map_err(|_| DecodeError::ZeroDenominator)?;
+
+    // Round-trip check
+    if witness.canon != bytes {
+        return Err(DecodeError::NonMinimalEncoding);
+    }
+
+    Ok(witness)
+}
+
+// Helper: given a byte slice starting with an Int encoding,
+// return the exact slice that constitutes the Int (no trailing bytes).
+fn find_int_slice(bytes: &[u8]) -> Result<&[u8], DecodeError> {
+    // Int: [0x02, sign, <nat>]
+    // Nat: [0x01, u32_len, mag...]
+    if bytes.len() < 7 {
+        return Err(DecodeError::UnexpectedEof);
+    }
+    if bytes[0] != 0x02 {
+        return Err(DecodeError::WrongTag { expected: 0x02, got: bytes[0] });
+    }
+    // nat starts at offset 2
+    if bytes[2] != 0x01 {
+        return Err(DecodeError::WrongTag { expected: 0x01, got: bytes[2] });
+    }
+    let mag_len = u32::from_be_bytes([bytes[3], bytes[4], bytes[5], bytes[6]]) as usize;
+    let total = 2 + 1 + 4 + mag_len; // 0x02 + sign + nat_tag + nat_len + mag
+    if bytes.len() < total {
+        return Err(DecodeError::LengthMismatch { expected: total, got: bytes.len() });
+    }
+    Ok(&bytes[..total])
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -973,6 +1170,128 @@ mod tests {
         println!("  short failure       : {:?}", result.failure);
         assert!(!result.ok);
         assert_eq!(result.failure, Some(ReplayFailureKind::PolicyMismatch));
+    }
+
+    #[test]
+    fn decode_nat_roundtrip_and_rejection() {
+        println!("\n── decode_nat ────────────────────────────────────");
+
+        // Round-trips
+        for n in [0u64, 1, 10, 255, 256, 65535, u64::MAX] {
+            let enc = encode_nat(n);
+            let dec = decode_nat(&enc).unwrap();
+            assert_eq!(dec.extent, n, "round-trip failed for {n}");
+            println!("  round-trip {:>20} : ok", n);
+        }
+
+        // Wrong tag
+        let mut bad = encode_nat(10);
+        bad[0] = 0x02;
+        assert_eq!(decode_nat(&bad).unwrap_err(), DecodeError::WrongTag { expected: 0x01, got: 0x02 });
+        println!("  wrong tag              : {:?}", DecodeError::WrongTag { expected: 0x01, got: 0x02 });
+
+        // Truncated
+        let enc = encode_nat(10);
+        assert_eq!(decode_nat(&enc[..3]).unwrap_err(), DecodeError::UnexpectedEof);
+        println!("  truncated              : {:?}", DecodeError::UnexpectedEof);
+
+        // Non-minimal: leading zero in magnitude
+        // [0x01, 0x00, 0x00, 0x00, 0x02, 0x00, 0x0A] — len=2, mag=[0x00,0x0A]
+        let non_minimal = vec![0x01, 0x00, 0x00, 0x00, 0x02, 0x00, 0x0A];
+        assert_eq!(decode_nat(&non_minimal).unwrap_err(), DecodeError::NonMinimalEncoding);
+        println!("  non-minimal leading 0  : {:?}", DecodeError::NonMinimalEncoding);
+
+        // Trailing bytes
+        let mut trailing = encode_nat(10);
+        trailing.push(0xFF);
+        assert_eq!(decode_nat(&trailing).unwrap_err(), DecodeError::TrailingBytes);
+        println!("  trailing bytes         : {:?}", DecodeError::TrailingBytes);
+
+        // Length mismatch: claims len=5 but only 3 mag bytes
+        let bad_len = vec![0x01, 0x00, 0x00, 0x00, 0x05, 0x01, 0x02, 0x03];
+        assert_eq!(decode_nat(&bad_len).unwrap_err(),
+            DecodeError::LengthMismatch { expected: 10, got: 8 });
+        println!("  length mismatch        : {:?}", DecodeError::LengthMismatch { expected: 10, got: 8 });
+    }
+
+    #[test]
+    fn decode_int_roundtrip_and_rejection() {
+        println!("\n── decode_int ────────────────────────────────────");
+
+        // Round-trips
+        for v in [0i64, 1, -1, 42, -42, i64::MAX, i64::MIN] {
+            let wit = IntWitness::new(v);
+            let dec = decode_int(&wit.canon).unwrap();
+            assert_eq!(dec.value(), v, "round-trip failed for {v}");
+            println!("  round-trip {:>20} : ok", v);
+        }
+
+        // Wrong tag
+        let mut bad = IntWitness::new(5).canon;
+        bad[0] = 0x03;
+        assert_eq!(decode_int(&bad).unwrap_err(), DecodeError::WrongTag { expected: 0x02, got: 0x03 });
+        println!("  wrong tag              : {:?}", DecodeError::WrongTag { expected: 0x02, got: 0x03 });
+
+        // Invalid sign byte
+        let mut bad_sign = IntWitness::new(5).canon;
+        bad_sign[1] = 0x05;
+        assert_eq!(decode_int(&bad_sign).unwrap_err(), DecodeError::InvalidSignByte(0x05));
+        println!("  invalid sign byte      : {:?}", DecodeError::InvalidSignByte(0x05));
+
+        // Negative zero: [0x02, 0x02, <Nat(0)>]
+        let nat_zero = encode_nat(0);
+        let mut neg_zero = vec![0x02, 0x02];
+        neg_zero.extend_from_slice(&nat_zero);
+        assert_eq!(decode_int(&neg_zero).unwrap_err(), DecodeError::NegativeZero);
+        println!("  negative zero          : {:?}", DecodeError::NegativeZero);
+
+        // Zero with nonzero sign: [0x02, 0x01, <Nat(0)>]
+        let mut zero_pos = vec![0x02, 0x01];
+        zero_pos.extend_from_slice(&nat_zero);
+        assert_eq!(decode_int(&zero_pos).unwrap_err(), DecodeError::ZeroWithNonzeroSign);
+        println!("  zero with pos sign     : {:?}", DecodeError::ZeroWithNonzeroSign);
+    }
+
+    #[test]
+    fn decode_rat_roundtrip_and_rejection() {
+        println!("\n── decode_rat ────────────────────────────────────");
+
+        // Round-trips
+        for (n, d) in [(0i64,1u64),(1,2),(-1,3),(3,4),(-7,8),(1,1)] {
+            let wit = RatWitness::new(n, d).unwrap();
+            let dec = decode_rat(&wit.canon).unwrap();
+            assert_eq!(dec.num.value(), n, "round-trip num failed for {n}/{d}");
+            assert_eq!(dec.den.extent, d, "round-trip den failed for {n}/{d}");
+            println!("  round-trip {:>5}/{:<5} : ok", n, d);
+        }
+
+        // Wrong tag
+        let mut bad = RatWitness::new(1, 2).unwrap().canon;
+        bad[0] = 0x01;
+        assert_eq!(decode_rat(&bad).unwrap_err(), DecodeError::WrongTag { expected: 0x03, got: 0x01 });
+        println!("  wrong tag              : {:?}", DecodeError::WrongTag { expected: 0x03, got: 0x01 });
+
+        // Unreduced rational: encode 2/4 manually (bypassing RatWitness::new)
+        // [0x03, Int(2), Nat(4)]
+        let mut unreduced = vec![0x03];
+        unreduced.extend_from_slice(&IntWitness::new(2).canon);
+        unreduced.extend_from_slice(&NatWitness::new(4).canon);
+        assert_eq!(decode_rat(&unreduced).unwrap_err(), DecodeError::UnreducedRational);
+        println!("  unreduced 2/4          : {:?}", DecodeError::UnreducedRational);
+
+        // Alternate zero rational: 0/2 instead of 0/1
+        let mut alt_zero = vec![0x03];
+        alt_zero.extend_from_slice(&IntWitness::new(0).canon);
+        alt_zero.extend_from_slice(&NatWitness::new(2).canon);
+        assert_eq!(decode_rat(&alt_zero).unwrap_err(), DecodeError::AlternateZeroRational);
+        println!("  alt zero 0/2           : {:?}", DecodeError::AlternateZeroRational);
+
+        // Zero denominator: [0x03, Int(1), Nat(0)]
+        let mut zero_den = vec![0x03];
+        zero_den.extend_from_slice(&IntWitness::new(1).canon);
+        zero_den.extend_from_slice(&NatWitness::new(0).canon);
+        assert_eq!(decode_rat(&zero_den).unwrap_err(), DecodeError::ZeroDenominator);
+        println!("  zero denominator       : {:?}", DecodeError::ZeroDenominator);
     }
     #[test]
     fn merkle_root_is_deterministic() {

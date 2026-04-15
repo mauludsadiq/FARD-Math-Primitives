@@ -139,7 +139,16 @@ All ops return Result — overflow never silently alters semantics.
 |------------------------------------|------------|
 | 1 — Rust kernel prototype          | complete   |
 | 1.1 — Canonical decode enforcement | complete   |
-| 2 — Unbounded Nat/Int/Rat          | next       |
+| 2 — Unbounded Nat/Int/Rat          | in progress |
+
+### Phase 2 Progress
+- ✅ NatWitness migrated to BigUint (unbounded naturals)
+- ✅ Nat arithmetic no longer overflows
+- 🔄 IntWitness still i64-backed (bridge mode)
+- 🔄 RatWitness still u64/i64-backed (bridge mode)
+
+Invariant:
+Nat layer is now structurally unbounded; higher layers remain in compatibility mode until migration completes.
 | 3 — Full exact op closure          | pending    |
 | 4 — Stable ABI                     | pending    |
 | 5 — Runtime integration            | pending    |

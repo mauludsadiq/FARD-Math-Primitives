@@ -144,11 +144,11 @@ All ops return Result — overflow never silently alters semantics.
 ### Phase 2 Progress
 - ✅ NatWitness migrated to BigUint (unbounded naturals)
 - ✅ Nat arithmetic no longer overflows
-- 🔄 IntWitness still i64-backed (bridge mode)
+- ✅ IntWitness migrated to BigInt (unbounded integers)
 - 🔄 RatWitness still u64/i64-backed (bridge mode)
 
 Invariant:
-Nat layer is now structurally unbounded; higher layers remain in compatibility mode until migration completes.
+Nat and Int layers are now structurally unbounded; Rat remains in compatibility mode until migration completes.
 | 3 — Full exact op closure          | pending    |
 | 4 — Stable ABI                     | pending    |
 | 5 — Runtime integration            | pending    |

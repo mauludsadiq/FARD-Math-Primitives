@@ -11,7 +11,7 @@ Structural arithmetic kernel for FARD — Rust-first implementation of `ArithCor
 
 15/15 tests passing. Run with:
 
-    cargo t
+    cargo test
 
 ---
 
@@ -113,7 +113,7 @@ All ops return Result — overflow never silently alters semantics.
 ## Build and run
 
     cargo build
-    cargo t
+    cargo test
     cargo run --example demo
 
 ---
@@ -122,7 +122,7 @@ All ops return Result — overflow never silently alters semantics.
 
     FARD Math Primitives/
     ├── .cargo/
-    │   └── config.toml        # cargo t alias
+    │   └── config.toml        # cargo test command
     ├── .vscode/
     ├── examples/
     │   └── demo.rs

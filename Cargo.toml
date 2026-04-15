@@ -1,0 +1,14 @@
+[package]
+name = "fard_math_primitives"
+version = "0.1.0"
+edition = "2021"
+description = "Structural arithmetic kernel prototype for FARD: nat/int/rat witnesses, shadow mode checks, and Merkleized arithmetic receipts."
+license = "MIT"
+readme = "README.md"
+repository = ""
+
+[dependencies]
+sha2 = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"

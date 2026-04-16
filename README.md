@@ -1,6 +1,6 @@
 # FARD Math Primitives
 
-Structural arithmetic kernel for FARD — Rust-first implementation of `ArithCore v0.3.0`.
+Structural arithmetic kernel for FARD — Rust-first implementation of `ArithCore v0.3.0` with runtime integration layer.
 
 ---
 
@@ -9,9 +9,9 @@ Structural arithmetic kernel for FARD — Rust-first implementation of `ArithCor
 **ArithCore v0.1.0** — complete (canonical witnesses, receipts, Merkle, replay)
 **ArithCore v0.1.1** — complete (canonical decode enforcement)
 **ArithCore v0.2.0** — complete (first-principles unbounded arithmetic, no external bignum)
-**ArithCore v0.3.0** — complete (full exact op closure)
+**ArithCore v0.3.0** — complete (full exact op closure, ABI frozen, runtime integration layer)
 
-26/26 tests passing. Run with:
+27/27 tests passing. Run with:
 
     cargo t
 
@@ -53,6 +53,16 @@ decode(encode(x)) == x verified for full value range including beyond machine bo
 - int: eq, cmp, add, sub, mul, neg, abs, signum, divrem (Euclidean), pow
 - rat: eq, cmp, add, sub, mul, div_checked, normalize, abs, signum, floor, ceil, trunc, pow
 - Display implemented for NatWitness, IntWitness, RatWitness
+
+### Runtime integration layer (src/runtime.rs)
+The stable entry point the FARD runtime will call into. Does not touch FARD itself.
+
+- `runtime_nat` / `runtime_int` / `runtime_rat` — literal construction from BigNat/BigInt
+- `runtime_int_add/sub/mul/neg/abs/divrem/pow/eq/cmp` — mode-aware integer ops
+- `runtime_nat_add/mul/divrem/eq/cmp` — nat ops
+- `runtime_rat_add/sub/mul/div/floor/ceil/trunc/eq/cmp` — rat ops
+- Every op returns `RuntimeOpResult { value, receipt }` — receipt ready to attach to evaluator trace
+- `runtime_commit_block` — aggregate receipts into a Merkle block for a trace segment
 
 ### Overflow policy (v0.2.0)
 - Structural overflow is impossible — BigNat/BigInt are unbounded
@@ -97,7 +107,7 @@ decode(encode(x)) == x verified for full value range including beyond machine bo
 
 ---
 
-## Test coverage (26 tests)
+## Test coverage (27 tests)
 
 | Test                               | What it proves                                    |
 |------------------------------------|---------------------------------------------------|
@@ -124,6 +134,7 @@ decode(encode(x)) == x verified for full value range including beyond machine bo
 | bignat_gcd                         | BigNat gcd correctness                            |
 | bignat_be_bytes_roundtrip          | BigNat byte encoding round-trips                  |
 | bigint_arithmetic                  | BigInt add/sub/mul/neg/cmp beyond i64             |
+| runtime_integration                | Full runtime layer: literals, ops, trace block    |
 | nat_divrem_and_pow                 | nat.divrem, nat.pow including unbounded           |
 | int_divrem_abs_signum_pow          | int.divrem Euclidean, abs, signum, pow            |
 | rat_floor_ceil_trunc_abs_signum_pow| rat rounding, abs, signum, pow                    |
@@ -148,7 +159,8 @@ decode(encode(x)) == x verified for full value range including beyond machine bo
     │   └── demo.rs
     ├── src/
     │   ├── lib.rs             # kernel: witnesses, ops, receipts, replay, decode
-    │   └── bignum.rs          # first-principles BigNat and BigInt
+    │   ├── bignum.rs          # first-principles BigNat and BigInt
+    │   └── runtime.rs         # runtime integration layer
     ├── Cargo.toml
     └── README.md
 
@@ -162,9 +174,9 @@ decode(encode(x)) == x verified for full value range including beyond machine bo
 | 1.1 — Canonical decode enforcement | complete   |
 | 2 — Unbounded Nat/Int/Rat          | complete   |
 | 3 — Full exact op closure          | complete   |
-| 4 — Stable ABI                     | next       |
-| 5 — Runtime integration            | pending    |
-| 6 — Std rebase                     | pending    |
+| 4 — Stable ABI                     | complete   |
+| 5 — Runtime integration            | complete   |
+| 6 — Std rebase                     | next       |
 | 7 — Strict numeric lane            | pending    |
 | 8 — Decimal/fixed-point            | pending    |
 | 9 — ApproxCore                     | pending    |

@@ -6,6 +6,7 @@ use crate::bignum::{BigNat, BigInt as OurBigInt};
 pub type Digest = [u8; 32];
 
 pub mod bignum;
+pub mod runtime;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ArithMode {
@@ -252,6 +253,8 @@ pub enum ArithmeticError {
     NativeOverflow,
     #[error("shadow mismatch")]
     ShadowMismatch,
+    #[error("domain mismatch — wrong witness type")]
+    DomainMismatch,
     #[error("negative nat result")]
     NegativeNatResult,
     #[error("divide by zero")]
@@ -295,6 +298,79 @@ pub fn shadow_add_int(lhs: i64, rhs: i64, mode: ArithMode) -> Result<(Structural
 }
 
 impl StructuralNumber {
+
+    pub fn from_nat(magnitude: BigNat, mode: ArithMode) -> Self {
+        let wit = NatWitness::new(magnitude);
+        Self {
+            repr: StructuralRepr::HostInt(OurBigInt::from_i64(wit.as_u64().unwrap_or(0) as i64)),
+            canon: wit.canon.clone(),
+            receipt_link: wit.digest,
+            witness: StructuralWitness::Nat(wit),
+            mode,
+        }
+    }
+
+    pub fn from_bigint(value: OurBigInt, mode: ArithMode) -> Self {
+        let wit = IntWitness::from_bigint(value.clone());
+        Self {
+            repr: StructuralRepr::HostInt(value),
+            canon: wit.canon.clone(),
+            receipt_link: wit.digest,
+            witness: StructuralWitness::Int(wit),
+            mode,
+        }
+    }
+
+    pub fn from_rat_big(num: OurBigInt, den: BigNat, mode: ArithMode) -> Result<Self, ArithmeticError> {
+        let wit = RatWitness::new_big(num.clone(), den.clone())?;
+        Ok(Self {
+            repr: StructuralRepr::ExactRational { num, den },
+            canon: wit.canon.clone(),
+            receipt_link: wit.digest,
+            witness: StructuralWitness::Rat(wit),
+            mode,
+        })
+    }
+
+    pub fn as_int_witness(&self) -> Result<&IntWitness, ArithmeticError> {
+        match &self.witness {
+            StructuralWitness::Int(w) => Ok(w),
+            _ => Err(ArithmeticError::DomainMismatch),
+        }
+    }
+
+    pub fn as_nat_witness(&self) -> Result<&NatWitness, ArithmeticError> {
+        match &self.witness {
+            StructuralWitness::Nat(w) => Ok(w),
+            _ => Err(ArithmeticError::DomainMismatch),
+        }
+    }
+
+    pub fn as_rat_witness(&self) -> Result<&RatWitness, ArithmeticError> {
+        match &self.witness {
+            StructuralWitness::Rat(w) => Ok(w),
+            _ => Err(ArithmeticError::DomainMismatch),
+        }
+    }
+
+    pub fn canon_hex(&self) -> String {
+        crate::hex_digest(&self.receipt_link)
+    }
+
+    pub fn as_bigint(&self) -> &OurBigInt {
+        match &self.witness {
+            StructuralWitness::Int(w) => &w.value,
+            _ => panic!("as_bigint called on non-Int witness"),
+        }
+    }
+
+    pub fn as_rat_str(&self) -> String {
+        match &self.witness {
+            StructuralWitness::Rat(w) => format!("{}/{}", w.num, w.den),
+            _ => panic!("as_rat_str called on non-Rat witness"),
+        }
+    }
+
     pub fn as_i64(&self) -> i64 {
         match &self.witness {
             StructuralWitness::Int(v) => v.as_i64().unwrap(),
@@ -1726,6 +1802,93 @@ mod tests {
         println!("  rat.pow(1/2, 0)    : {}/{}", p0.num.as_i64().unwrap(), p0.den.as_u64().unwrap());
         assert_eq!(p0.num.as_i64().unwrap(), 1);
         assert_eq!(p0.den.as_u64().unwrap(), 1);
+    }
+
+    #[test]
+    fn runtime_integration() {
+        println!("\n── runtime_integration ──────────────────────────");
+        use crate::runtime::*;
+        use crate::bignum::{BigNat, BigInt as OurBigInt};
+
+        let mode = ArithMode::Strict;
+
+        // Literal construction
+        let a = runtime_int(OurBigInt::from_i64(10), mode);
+        let b = runtime_int(OurBigInt::from_i64(20), mode);
+        println!("  runtime_int(10)    : {}", a.as_i64());
+        println!("  runtime_int(20)    : {}", b.as_i64());
+        assert_eq!(a.as_i64(), 10);
+        assert_eq!(b.as_i64(), 20);
+
+        // Add
+        let r = runtime_int_add(&a, &b, mode).unwrap();
+        println!("  runtime_int_add    : {}", r.value.as_i64());
+        println!("  receipt op         : {}", r.receipt.op);
+        assert_eq!(r.value.as_i64(), 30);
+        assert_eq!(r.receipt.op, "int.add");
+
+        // Sub
+        let r = runtime_int_sub(&b, &a, mode).unwrap();
+        println!("  runtime_int_sub    : {}", r.value.as_i64());
+        assert_eq!(r.value.as_i64(), 10);
+
+        // Mul
+        let r = runtime_int_mul(&a, &b, mode).unwrap();
+        println!("  runtime_int_mul    : {}", r.value.as_i64());
+        assert_eq!(r.value.as_i64(), 200);
+
+        // Neg
+        let r = runtime_int_neg(&a, mode).unwrap();
+        println!("  runtime_int_neg    : {}", r.value.as_i64());
+        assert_eq!(r.value.as_i64(), -10);
+
+        // Abs
+        let neg = runtime_int(OurBigInt::from_i64(-42), mode);
+        let r = runtime_int_abs(&neg, mode).unwrap();
+        println!("  runtime_int_abs    : {}", r.value.as_i64());
+        assert_eq!(r.value.as_i64(), 42);
+
+        // Divrem
+        let seventeen = runtime_int(OurBigInt::from_i64(17), mode);
+        let five = runtime_int(OurBigInt::from_i64(5), mode);
+        let (q, r_val) = runtime_int_divrem(&seventeen, &five, mode).unwrap();
+        println!("  runtime_int_divrem : q={} r={}", q.value.as_i64(), r_val.value.as_i64());
+        assert_eq!(q.value.as_i64(), 3);
+        assert_eq!(r_val.value.as_i64(), 2);
+
+        // Eq and Cmp
+        let a2 = runtime_int(OurBigInt::from_i64(10), mode);
+        println!("  runtime_int_eq     : {}", runtime_int_eq(&a, &a2).unwrap());
+        println!("  runtime_int_cmp    : {:?}", runtime_int_cmp(&a, &b).unwrap());
+        assert!(runtime_int_eq(&a, &a2).unwrap());
+        assert_eq!(runtime_int_cmp(&a, &b).unwrap(), std::cmp::Ordering::Less);
+
+        // Unbounded — beyond i64
+        let big = runtime_int(OurBigInt::from_i64(i64::MAX), mode);
+        let one = runtime_int(OurBigInt::from_i64(1), mode);
+        let r = runtime_int_add(&big, &one, mode).unwrap();
+        println!("  i64::MAX + 1       : {} (unbounded)", r.receipt.native_summary);
+        assert!(r.value.as_bigint().to_i64().is_none());
+
+        // Rat operations
+        let half = runtime_rat(OurBigInt::from_i64(1), BigNat::from_u64(2), mode).unwrap();
+        let third = runtime_rat(OurBigInt::from_i64(1), BigNat::from_u64(3), mode).unwrap();
+        let sum = runtime_rat_add(&half, &third, mode).unwrap();
+        println!("  1/2 + 1/3          : {}", sum.value.as_rat_str());
+        let rw = sum.value.as_rat_witness().unwrap();
+        assert_eq!(rw.num.as_i64().unwrap(), 5);
+        assert_eq!(rw.den.as_u64().unwrap(), 6);
+
+        // Trace block
+        let receipts = vec![
+            runtime_int_add(&a, &b, mode).unwrap().receipt,
+            runtime_int_mul(&a, &b, mode).unwrap().receipt,
+        ];
+        let block = runtime_commit_block("test_region_001", &receipts);
+        println!("  block leaf_count   : {}", block.leaf_count);
+        println!("  block merkle_root  : {}", crate::hex_digest(&block.merkle_root));
+        assert_eq!(block.leaf_count, 2);
+        assert_eq!(block.block_id, "test_region_001");
     }
     #[test]
     fn merkle_root_is_deterministic() {

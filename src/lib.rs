@@ -894,6 +894,236 @@ fn find_int_slice(bytes: &[u8]) -> Result<&[u8], DecodeError> {
 }
 
 
+// ── Phase 3: Full Exact Op Closure ───────────────────────────────────────────
+
+// nat.divrem
+pub fn nat_divrem(a: &NatWitness, b: &NatWitness) -> Result<(NatWitness, NatWitness), ArithmeticError> {
+    if b.magnitude.is_zero() {
+        return Err(ArithmeticError::DivideByZero);
+    }
+    let (q, r) = a.magnitude.divrem(&b.magnitude);
+    Ok((NatWitness::new(q), NatWitness::new(r)))
+}
+
+// nat.pow — exponentiation by natural exponent
+pub fn nat_pow(base: &NatWitness, exp: &NatWitness) -> NatWitness {
+    let mut result = BigNat::from_u64(1);
+    let mut b = base.magnitude.clone();
+    let mut e = exp.magnitude.clone();
+    let two = BigNat::from_u64(2);
+    while !e.is_zero() {
+        let (eq, er) = e.divrem(&two);
+        if !er.is_zero() {
+            result = result.mul(&b);
+        }
+        b = b.mul(&b);
+        e = eq;
+    }
+    NatWitness::new(result)
+}
+
+// int.abs
+pub fn int_abs(a: &IntWitness) -> NatWitness {
+    NatWitness::new(a.value.magnitude.clone())
+}
+
+// int.signum
+pub fn int_signum(a: &IntWitness) -> IntWitness {
+    match a.value.sign {
+        crate::Sign::Zero     => IntWitness::from_i64(0),
+        crate::Sign::Positive => IntWitness::from_i64(1),
+        crate::Sign::Negative => IntWitness::from_i64(-1),
+    }
+}
+
+// int.divrem — Euclidean division: remainder is always non-negative
+pub fn int_divrem(a: &IntWitness, b: &IntWitness) -> Result<(IntWitness, IntWitness), ArithmeticError> {
+    if b.value.is_zero() {
+        return Err(ArithmeticError::DivideByZero);
+    }
+    let (q_mag, r_mag) = a.value.magnitude.divrem(&b.value.magnitude);
+    // Euclidean: remainder always non-negative
+    // adjust quotient and remainder based on signs
+    let (q_sign, _r_sign) = match (a.value.sign, b.value.sign) {
+        (crate::Sign::Zero, _) => (crate::Sign::Zero, crate::Sign::Zero),
+        (_, crate::Sign::Zero) => unreachable!(),
+        (crate::Sign::Positive, crate::Sign::Positive) => (crate::Sign::Positive, crate::Sign::Positive),
+        (crate::Sign::Positive, crate::Sign::Negative) => (crate::Sign::Negative, crate::Sign::Positive),
+        (crate::Sign::Negative, crate::Sign::Positive) => {
+            // if remainder nonzero: q = -(q_mag+1), r = b_mag - r_mag
+            if r_mag.is_zero() {
+                (crate::Sign::Negative, crate::Sign::Zero)
+            } else {
+                (crate::Sign::Negative, crate::Sign::Positive)
+            }
+        }
+        (crate::Sign::Negative, crate::Sign::Negative) => {
+            if r_mag.is_zero() {
+                (crate::Sign::Positive, crate::Sign::Zero)
+            } else {
+                (crate::Sign::Positive, crate::Sign::Positive)
+            }
+        }
+    };
+    // adjust for Euclidean remainder non-negativity
+    let (final_q_mag, final_r_mag) = match (a.value.sign, b.value.sign) {
+        (crate::Sign::Negative, crate::Sign::Positive) if !r_mag.is_zero() => {
+            let adj_q = q_mag.add(&BigNat::from_u64(1));
+            let adj_r = b.value.magnitude.sub(&r_mag);
+            (adj_q, adj_r)
+        }
+        (crate::Sign::Negative, crate::Sign::Negative) if !r_mag.is_zero() => {
+            let adj_q = q_mag.add(&BigNat::from_u64(1));
+            let adj_r = b.value.magnitude.sub(&r_mag);
+            (adj_q, adj_r)
+        }
+        _ => (q_mag, r_mag),
+    };
+    let q = IntWitness::from_bigint(OurBigInt::from_bignat(q_sign, final_q_mag));
+    let r = IntWitness::from_bigint(OurBigInt::from_bignat(
+        if final_r_mag.is_zero() { crate::Sign::Zero } else { crate::Sign::Positive },
+        final_r_mag,
+    ));
+    Ok((q, r))
+}
+
+// int.pow — exponentiation by natural exponent
+pub fn int_pow(base: &IntWitness, exp: &NatWitness) -> IntWitness {
+    let mut result = OurBigInt::from_i64(1);
+    let mut b = base.value.clone();
+    let mut e = exp.magnitude.clone();
+    let two = BigNat::from_u64(2);
+    while !e.is_zero() {
+        let (eq, er) = e.divrem(&two);
+        if !er.is_zero() {
+            result = result.mul(&b);
+        }
+        b = b.mul(&b);
+        e = eq;
+    }
+    IntWitness::from_bigint(result)
+}
+
+// rat.abs
+pub fn rat_abs(a: &RatWitness) -> Result<RatWitness, ArithmeticError> {
+    RatWitness::new_big(
+        OurBigInt::from_bignat(crate::Sign::Positive, a.num.value.magnitude.clone()),
+        a.den.magnitude.clone(),
+    )
+}
+
+// rat.signum
+pub fn rat_signum(a: &RatWitness) -> IntWitness {
+    match a.num.value.sign {
+        crate::Sign::Zero     => IntWitness::from_i64(0),
+        crate::Sign::Positive => IntWitness::from_i64(1),
+        crate::Sign::Negative => IntWitness::from_i64(-1),
+    }
+}
+
+// rat.floor — largest integer <= a
+pub fn rat_floor(a: &RatWitness) -> IntWitness {
+    let (q, r) = a.num.value.magnitude.divrem(&a.den.magnitude);
+    match a.num.value.sign {
+        crate::Sign::Zero => IntWitness::from_i64(0),
+        crate::Sign::Positive => {
+            IntWitness::from_bigint(OurBigInt::from_bignat(crate::Sign::Positive, q))
+        }
+        crate::Sign::Negative => {
+            // floor of negative: if remainder nonzero, subtract 1
+            if r.is_zero() {
+                IntWitness::from_bigint(OurBigInt::from_bignat(crate::Sign::Negative, q))
+            } else {
+                let adj = q.add(&BigNat::from_u64(1));
+                IntWitness::from_bigint(OurBigInt::from_bignat(crate::Sign::Negative, adj))
+            }
+        }
+    }
+}
+
+// rat.ceil — smallest integer >= a
+pub fn rat_ceil(a: &RatWitness) -> IntWitness {
+    let (q, r) = a.num.value.magnitude.divrem(&a.den.magnitude);
+    match a.num.value.sign {
+        crate::Sign::Zero => IntWitness::from_i64(0),
+        crate::Sign::Positive => {
+            if r.is_zero() {
+                IntWitness::from_bigint(OurBigInt::from_bignat(crate::Sign::Positive, q))
+            } else {
+                let adj = q.add(&BigNat::from_u64(1));
+                IntWitness::from_bigint(OurBigInt::from_bignat(crate::Sign::Positive, adj))
+            }
+        }
+        crate::Sign::Negative => {
+            IntWitness::from_bigint(OurBigInt::from_bignat(
+                if q.is_zero() { crate::Sign::Zero } else { crate::Sign::Negative },
+                q,
+            ))
+        }
+    }
+}
+
+// rat.trunc — truncate toward zero
+pub fn rat_trunc(a: &RatWitness) -> IntWitness {
+    let (q, _) = a.num.value.magnitude.divrem(&a.den.magnitude);
+    IntWitness::from_bigint(OurBigInt::from_bignat(
+        if q.is_zero() { crate::Sign::Zero } else { a.num.value.sign },
+        q,
+    ))
+}
+
+// rat.pow — exponentiation by integer exponent (negative exp gives reciprocal)
+pub fn rat_pow(base: &RatWitness, exp: i64) -> Result<RatWitness, ArithmeticError> {
+    if exp == 0 {
+        return RatWitness::new(1, 1);
+    }
+    let abs_exp = exp.unsigned_abs();
+    let mut num = OurBigInt::from_i64(1);
+    let mut den = BigNat::from_u64(1);
+    let mut bn = base.num.value.clone();
+    let mut bd = base.den.magnitude.clone();
+    let mut e = abs_exp;
+    while e > 0 {
+        if e & 1 == 1 {
+            num = num.mul(&bn);
+            den = den.mul(&bd);
+        }
+        bn = bn.mul(&bn);
+        bd = bd.mul(&bd);
+        e >>= 1;
+    }
+    if exp < 0 {
+        // reciprocal: swap num and den, fix sign
+        let (new_num, new_den) = match num.sign {
+            crate::Sign::Negative => (OurBigInt::from_bignat(crate::Sign::Negative, den), num.magnitude),
+            _ => (OurBigInt::from_bignat(crate::Sign::Positive, den), num.magnitude),
+        };
+        RatWitness::new_big(new_num, new_den)
+    } else {
+        RatWitness::new_big(num, den)
+    }
+}
+
+
+impl fmt::Display for NatWitness {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.magnitude)
+    }
+}
+
+impl fmt::Display for IntWitness {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.value)
+    }
+}
+
+impl fmt::Display for RatWitness {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}/{}", self.num, self.den)
+    }
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1305,6 +1535,153 @@ mod tests {
         zero_den.extend_from_slice(&NatWitness::from_u64(0).canon);
         assert_eq!(decode_rat(&zero_den).unwrap_err(), DecodeError::ZeroDenominator);
         println!("  zero denominator       : {:?}", DecodeError::ZeroDenominator);
+    }
+
+    #[test]
+    fn nat_divrem_and_pow() {
+        println!("\n── nat_divrem_and_pow ────────────────────────────");
+
+        let a = NatWitness::from_u64(100);
+        let b = NatWitness::from_u64(7);
+        let (q, r) = nat_divrem(&a, &b).unwrap();
+        println!("  nat.divrem(100,7)  : {} rem {}", q, r);
+        assert_eq!(q.as_u64().unwrap(), 14);
+        assert_eq!(r.as_u64().unwrap(), 2);
+
+        let zero = NatWitness::from_u64(0);
+        assert_eq!(nat_divrem(&a, &zero).unwrap_err(), ArithmeticError::DivideByZero);
+        println!("  nat.divrem(100,0)  : DivideByZero");
+
+        let base = NatWitness::from_u64(2);
+        let exp  = NatWitness::from_u64(10);
+        let p = nat_pow(&base, &exp);
+        println!("  nat.pow(2,10)      : {}", p);
+        assert_eq!(p.as_u64().unwrap(), 1024);
+
+        // Beyond u64
+        let big_base = NatWitness::from_u64(u64::MAX);
+        let big_exp  = NatWitness::from_u64(2);
+        let big_p = nat_pow(&big_base, &big_exp);
+        println!("  nat.pow(u64::MAX,2): {} (unbounded)", big_p);
+        assert!(big_p.as_u64().is_none());
+
+        // pow 0
+        let p0 = nat_pow(&base, &zero);
+        println!("  nat.pow(2,0)       : {}", p0);
+        assert_eq!(p0.as_u64().unwrap(), 1);
+    }
+
+    #[test]
+    fn int_divrem_abs_signum_pow() {
+        println!("\n── int_divrem_abs_signum_pow ─────────────────────");
+
+        // int.abs
+        let pos = IntWitness::from_i64(42);
+        let neg = IntWitness::from_i64(-42);
+        let z   = IntWitness::from_i64(0);
+        println!("  int.abs(42)        : {}", int_abs(&pos));
+        println!("  int.abs(-42)       : {}", int_abs(&neg));
+        println!("  int.abs(0)         : {}", int_abs(&z));
+        assert_eq!(int_abs(&pos).as_u64().unwrap(), 42);
+        assert_eq!(int_abs(&neg).as_u64().unwrap(), 42);
+        assert_eq!(int_abs(&z).as_u64().unwrap(), 0);
+
+        // int.signum
+        println!("  int.signum(42)     : {}", int_signum(&pos).as_i64().unwrap());
+        println!("  int.signum(-42)    : {}", int_signum(&neg).as_i64().unwrap());
+        println!("  int.signum(0)      : {}", int_signum(&z).as_i64().unwrap());
+        assert_eq!(int_signum(&pos).as_i64().unwrap(),  1);
+        assert_eq!(int_signum(&neg).as_i64().unwrap(), -1);
+        assert_eq!(int_signum(&z).as_i64().unwrap(),    0);
+
+        // int.divrem Euclidean
+        let cases: &[(i64,i64,i64,i64)] = &[
+            ( 17,  5,  3, 2),
+            (-17,  5, -4, 3),
+            ( 17, -5, -3, 2),
+            (-17, -5,  4, 3),
+            ( 15,  5,  3, 0),
+            (-15,  5, -3, 0),
+        ];
+        for &(a, b, eq, er) in cases {
+            let (q, r) = int_divrem(&IntWitness::from_i64(a), &IntWitness::from_i64(b)).unwrap();
+            println!("  int.divrem({:>4},{:>3}) : q={:>3} r={}", a, b, q.as_i64().unwrap(), r.as_i64().unwrap());
+            assert_eq!(q.as_i64().unwrap(), eq, "divrem q failed for {a}/{b}");
+            assert_eq!(r.as_i64().unwrap(), er, "divrem r failed for {a}/{b}");
+            // Euclidean invariant: r >= 0
+            assert!(r.as_i64().unwrap() >= 0);
+        }
+
+        // int.pow
+        let base = IntWitness::from_i64(-2);
+        let exp  = NatWitness::from_u64(10);
+        let p = int_pow(&base, &exp);
+        println!("  int.pow(-2,10)     : {}", p.as_i64().unwrap());
+        assert_eq!(p.as_i64().unwrap(), 1024);
+
+        let exp3 = NatWitness::from_u64(3);
+        let p3 = int_pow(&base, &exp3);
+        println!("  int.pow(-2,3)      : {}", p3.as_i64().unwrap());
+        assert_eq!(p3.as_i64().unwrap(), -8);
+    }
+
+    #[test]
+    fn rat_floor_ceil_trunc_abs_signum_pow() {
+        println!("\n── rat_floor_ceil_trunc_abs_signum_pow ──────────");
+
+        let cases: &[(&str, i64, u64, i64, i64, i64)] = &[
+            // label,   num, den, floor, ceil, trunc
+            ( "7/2",    7,   2,   3,     4,    3),
+            ("-7/2",   -7,   2,  -4,    -3,   -3),
+            ( "4/2",    4,   2,   2,     2,    2),
+            ("-4/2",   -4,   2,  -2,    -2,   -2),
+            ( "1/3",    1,   3,   0,     1,    0),
+            ("-1/3",   -1,   3,  -1,     0,    0),
+        ];
+        for &(label, n, d, ef, ec, et) in cases {
+            let r = RatWitness::new(n, d).unwrap();
+            let f = rat_floor(&r).as_i64().unwrap();
+            let c = rat_ceil(&r).as_i64().unwrap();
+            let t = rat_trunc(&r).as_i64().unwrap();
+            println!("  floor({:>5}) = {:>3}  ceil = {:>3}  trunc = {:>3}", label, f, c, t);
+            assert_eq!(f, ef, "floor failed for {label}");
+            assert_eq!(c, ec, "ceil failed for {label}");
+            assert_eq!(t, et, "trunc failed for {label}");
+        }
+
+        // rat.abs
+        let neg = RatWitness::new(-3, 4).unwrap();
+        let abs = rat_abs(&neg).unwrap();
+        println!("  rat.abs(-3/4)      : {}/{}", abs.num.as_i64().unwrap(), abs.den.as_u64().unwrap());
+        assert_eq!(abs.num.as_i64().unwrap(), 3);
+        assert_eq!(abs.den.as_u64().unwrap(), 4);
+
+        // rat.signum
+        let pos = RatWitness::new(3, 4).unwrap();
+        let z   = RatWitness::new(0, 1).unwrap();
+        println!("  rat.signum(3/4)    : {}", rat_signum(&pos).as_i64().unwrap());
+        println!("  rat.signum(-3/4)   : {}", rat_signum(&neg).as_i64().unwrap());
+        println!("  rat.signum(0)      : {}", rat_signum(&z).as_i64().unwrap());
+        assert_eq!(rat_signum(&pos).as_i64().unwrap(),  1);
+        assert_eq!(rat_signum(&neg).as_i64().unwrap(), -1);
+        assert_eq!(rat_signum(&z).as_i64().unwrap(),    0);
+
+        // rat.pow
+        let half = RatWitness::new(1, 2).unwrap();
+        let p3 = rat_pow(&half, 3).unwrap();
+        println!("  rat.pow(1/2, 3)    : {}/{}", p3.num.as_i64().unwrap(), p3.den.as_u64().unwrap());
+        assert_eq!(p3.num.as_i64().unwrap(), 1);
+        assert_eq!(p3.den.as_u64().unwrap(), 8);
+
+        let pm3 = rat_pow(&half, -3).unwrap();
+        println!("  rat.pow(1/2,-3)    : {}/{}", pm3.num.as_i64().unwrap(), pm3.den.as_u64().unwrap());
+        assert_eq!(pm3.num.as_i64().unwrap(), 8);
+        assert_eq!(pm3.den.as_u64().unwrap(), 1);
+
+        let p0 = rat_pow(&half, 0).unwrap();
+        println!("  rat.pow(1/2, 0)    : {}/{}", p0.num.as_i64().unwrap(), p0.den.as_u64().unwrap());
+        assert_eq!(p0.num.as_i64().unwrap(), 1);
+        assert_eq!(p0.den.as_u64().unwrap(), 1);
     }
     #[test]
     fn merkle_root_is_deterministic() {

@@ -1,9 +1,8 @@
-use num_bigint::{BigInt, BigUint, Sign as NumSign};
-use num_traits::{Signed, ToPrimitive, Zero};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as ShaDigestTrait, Sha256};
 use std::cmp::Ordering;
 use std::fmt;
+use crate::bignum::{BigNat, BigInt as OurBigInt};
 
 pub type Digest = [u8; 32];
 
@@ -18,24 +17,28 @@ pub enum ArithMode {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NatWitness {
-    pub magnitude: BigUint,
+    pub magnitude: BigNat,
     pub canon: Vec<u8>,
     pub digest: Digest,
 }
 
 impl NatWitness {
-    pub fn new(magnitude: BigUint) -> Self {
+    pub fn new(magnitude: BigNat) -> Self {
         let canon = encode_nat(&magnitude);
         let digest = sha256(&canon);
         Self { magnitude, canon, digest }
     }
 
     pub fn from_u64(n: u64) -> Self {
-        Self::new(BigUint::from(n))
+        Self::new(BigNat::from_u64(n))
     }
 
     pub fn as_u64(&self) -> Option<u64> {
         self.magnitude.to_u64()
+    }
+
+    pub fn from_bignat(n: BigNat) -> Self {
+        Self::new(n)
     }
 }
 
@@ -48,24 +51,28 @@ pub enum Sign {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IntWitness {
-    pub value: BigInt,
+    pub value: OurBigInt,
     pub canon: Vec<u8>,
     pub digest: Digest,
 }
 
 impl IntWitness {
-    pub fn new(value: BigInt) -> Self {
+    pub fn new(value: OurBigInt) -> Self {
         let canon = encode_int(&value);
         let digest = sha256(&canon);
         Self { value, canon, digest }
     }
 
     pub fn from_i64(n: i64) -> Self {
-        Self::new(BigInt::from(n))
+        Self::new(OurBigInt::from_i64(n))
     }
 
     pub fn as_i64(&self) -> Option<i64> {
         self.value.to_i64()
+    }
+
+    pub fn from_bigint(v: OurBigInt) -> Self {
+        Self::new(v)
     }
 }
 
@@ -78,31 +85,48 @@ pub struct RatWitness {
 }
 
 impl RatWitness {
-    pub fn new(num: i64, den: u64) -> Result<Self, ArithmeticError> {
-        if den == 0 {
+    pub fn new_big(num: OurBigInt, den: BigNat) -> Result<Self, ArithmeticError> {
+        if den.is_zero() {
             return Err(ArithmeticError::ZeroDenominator);
         }
-        let mut n = num;
-        let mut d = den;
-        let g = gcd_u64(n.unsigned_abs(), d);
-        n /= g as i64;
-        d /= g;
-        if n == 0 {
-            d = 1;
-        }
-        let num = IntWitness::from_i64(n);
-        let den = NatWitness::from_u64(d);
-        let mut canon = Vec::with_capacity(1 + num.canon.len() + den.canon.len());
+        let g = BigNat::gcd(num.magnitude.clone(), den.clone());
+        let num_reduced = if g.is_zero() || g == BigNat::from_u64(1) {
+            num.clone()
+        } else {
+            let (q, _) = num.magnitude.divrem(&g);
+            OurBigInt::from_bignat(num.sign, q)
+        };
+        let den_reduced = if g.is_zero() || g == BigNat::from_u64(1) {
+            den.clone()
+        } else {
+            let (q, _) = den.divrem(&g);
+            q
+        };
+        let den_final = if num_reduced.is_zero() {
+            BigNat::from_u64(1)
+        } else {
+            den_reduced
+        };
+        let num_wit = IntWitness::from_bigint(num_reduced);
+        let den_wit = NatWitness::from_bignat(den_final);
+        let mut canon = Vec::with_capacity(1 + num_wit.canon.len() + den_wit.canon.len());
         canon.push(0x03);
-        canon.extend_from_slice(&num.canon);
-        canon.extend_from_slice(&den.canon);
+        canon.extend_from_slice(&num_wit.canon);
+        canon.extend_from_slice(&den_wit.canon);
         let digest = sha256(&canon);
         Ok(Self {
-            num,
-            den,
+            num: num_wit,
+            den: den_wit,
             canon,
             digest,
         })
+    }
+
+    pub fn new(num: i64, den: u64) -> Result<Self, ArithmeticError> {
+        Self::new_big(
+            bignum::BigInt::from_i64(num),
+            bignum::BigNat::from_u64(den),
+        )
     }
 }
 
@@ -144,8 +168,8 @@ impl StructuralNumber {
         let wit = RatWitness::new(num, den)?;
         Ok(Self {
             repr: StructuralRepr::ExactRational {
-                num: wit.num.as_i64().unwrap(),
-                den: wit.den.as_u64().unwrap(),
+                num: wit.num.as_i64().unwrap_or(0),
+                den: wit.den.as_u64().unwrap_or(0),
             },
             canon: wit.canon.clone(),
             receipt_link: wit.digest,
@@ -242,7 +266,9 @@ pub fn shadow_add_int(lhs: i64, rhs: i64, mode: ArithMode) -> Result<(Structural
     let rhs_num = StructuralNumber::from_int(rhs, mode);
 
     let native = lhs.checked_add(rhs).ok_or(ArithmeticError::NativeOverflow)?;
-    let structural = IntWitness::from_i64(lhs_num.as_i64() + rhs_num.as_i64());
+    let lhs_big = OurBigInt::from_i64(lhs_num.as_i64());
+    let rhs_big = OurBigInt::from_i64(rhs_num.as_i64());
+    let structural = IntWitness::from_bigint(lhs_big.add(&rhs_big));
     let verdict = native == structural.as_i64().unwrap();
     if matches!(mode, ArithMode::Strict) && !verdict {
         return Err(ArithmeticError::ShadowMismatch);
@@ -285,8 +311,8 @@ impl StructuralNumber {
     }
 }
 
-pub fn encode_nat(n: &BigUint) -> Vec<u8> {
-    let mag = if n.is_zero() { Vec::new() } else { n.to_bytes_be() };
+pub fn encode_nat(n: &BigNat) -> Vec<u8> {
+    let mag = n.to_be_bytes();
     let mut out = Vec::with_capacity(1 + 4 + mag.len());
     out.push(0x01);
     out.extend_from_slice(&(mag.len() as u32).to_be_bytes());
@@ -294,11 +320,11 @@ pub fn encode_nat(n: &BigUint) -> Vec<u8> {
     out
 }
 
-pub fn encode_int(value: &BigInt) -> Vec<u8> {
-    let (sign_byte, mag) = match value.sign() {
-        NumSign::NoSign => (0x00, BigUint::from(0u64)),
-        NumSign::Plus => (0x01, value.magnitude().clone()),
-        NumSign::Minus => (0x02, value.magnitude().clone()),
+pub fn encode_int(value: &OurBigInt) -> Vec<u8> {
+    let (sign_byte, mag) = match value.sign {
+        crate::Sign::Zero => (0x00u8, BigNat::zero()),
+        crate::Sign::Positive => (0x01u8, value.magnitude.clone()),
+        crate::Sign::Negative => (0x02u8, value.magnitude.clone()),
     };
     let nat = encode_nat(&mag);
     let mut out = Vec::with_capacity(1 + 1 + nat.len());
@@ -378,28 +404,26 @@ pub fn nat_eq(a: &NatWitness, b: &NatWitness) -> bool {
 
 // nat.cmp
 pub fn nat_cmp(a: &NatWitness, b: &NatWitness) -> std::cmp::Ordering {
-    a.magnitude.cmp(&b.magnitude)
+    a.magnitude.cmp_nat(&b.magnitude)
 }
 
 // nat.add
-pub fn nat_add(a: &NatWitness, b: &NatWitness) -> Result<NatWitness, ArithmeticError> {
-    let v = &a.magnitude + &b.magnitude;
-    Ok(NatWitness::new(v))
+pub fn nat_add(a: &NatWitness, b: &NatWitness) -> NatWitness {
+    NatWitness::new(a.magnitude.add(&b.magnitude))
 }
 
 // nat.sub_checked
 pub fn nat_sub_checked(a: &NatWitness, b: &NatWitness) -> Result<NatWitness, ArithmeticError> {
-    if a.magnitude >= b.magnitude {
-        Ok(NatWitness::new(&a.magnitude - &b.magnitude))
+    if a.magnitude.cmp_nat(&b.magnitude) != std::cmp::Ordering::Less {
+        Ok(NatWitness::new(a.magnitude.sub(&b.magnitude)))
     } else {
         Err(ArithmeticError::NegativeNatResult)
     }
 }
 
 // nat.mul
-pub fn nat_mul(a: &NatWitness, b: &NatWitness) -> Result<NatWitness, ArithmeticError> {
-    let v = &a.magnitude * &b.magnitude;
-    Ok(NatWitness::new(v))
+pub fn nat_mul(a: &NatWitness, b: &NatWitness) -> NatWitness {
+    NatWitness::new(a.magnitude.mul(&b.magnitude))
 }
 
 // int.eq
@@ -442,44 +466,51 @@ pub fn rat_eq(a: &RatWitness, b: &RatWitness) -> bool {
 
 // rat.cmp
 pub fn rat_cmp(a: &RatWitness, b: &RatWitness) -> std::cmp::Ordering {
-    let lhs = a.num.as_i64().unwrap() * b.den.as_u64().unwrap() as i64;
-    let rhs = b.num.as_i64().unwrap() * a.den.as_u64().unwrap() as i64;
-    lhs.cmp(&rhs)
+    let lhs = a.num.value.mul(&OurBigInt::from_bignat(crate::Sign::Positive, b.den.magnitude.clone()));
+    let rhs = b.num.value.mul(&OurBigInt::from_bignat(crate::Sign::Positive, a.den.magnitude.clone()));
+    lhs.cmp_int(&rhs)
 }
 
 // rat.add
 pub fn rat_add(a: &RatWitness, b: &RatWitness) -> Result<RatWitness, ArithmeticError> {
-    let num = a.num.as_i64().unwrap() * b.den.as_u64().unwrap() as i64 + b.num.as_i64().unwrap() * a.den.as_u64().unwrap() as i64;
-    let den = a.den.as_u64().unwrap() * b.den.as_u64().unwrap();
-    RatWitness::new(num, den)
+    let ad = a.num.value.mul(&OurBigInt::from_bignat(crate::Sign::Positive, b.den.magnitude.clone()));
+    let bc = b.num.value.mul(&OurBigInt::from_bignat(crate::Sign::Positive, a.den.magnitude.clone()));
+    let num = ad.add(&bc);
+    let den = a.den.magnitude.mul(&b.den.magnitude);
+    RatWitness::new_big(num, den)
 }
 
 // rat.sub
 pub fn rat_sub(a: &RatWitness, b: &RatWitness) -> Result<RatWitness, ArithmeticError> {
-    let num = a.num.as_i64().unwrap() * b.den.as_u64().unwrap() as i64 - b.num.as_i64().unwrap() * a.den.as_u64().unwrap() as i64;
-    let den = a.den.as_u64().unwrap() * b.den.as_u64().unwrap();
-    RatWitness::new(num, den)
+    let ad = a.num.value.mul(&OurBigInt::from_bignat(crate::Sign::Positive, b.den.magnitude.clone()));
+    let bc = b.num.value.mul(&OurBigInt::from_bignat(crate::Sign::Positive, a.den.magnitude.clone()));
+    let num = ad.sub(&bc);
+    let den = a.den.magnitude.mul(&b.den.magnitude);
+    RatWitness::new_big(num, den)
 }
 
 // rat.mul
 pub fn rat_mul(a: &RatWitness, b: &RatWitness) -> Result<RatWitness, ArithmeticError> {
-    let num = a.num.as_i64().unwrap() * b.num.as_i64().unwrap();
-    let den = a.den.as_u64().unwrap() * b.den.as_u64().unwrap();
-    RatWitness::new(num, den)
+    let num = a.num.value.mul(&b.num.value);
+    let den = a.den.magnitude.mul(&b.den.magnitude);
+    RatWitness::new_big(num, den)
 }
 
 // rat.div_checked
 pub fn rat_div_checked(a: &RatWitness, b: &RatWitness) -> Result<RatWitness, ArithmeticError> {
-    if b.num.as_i64().unwrap() == 0 {
+    if b.num.value.is_zero() {
         return Err(ArithmeticError::DivideByZero);
     }
-    let num = a.num.as_i64().unwrap() * b.den.as_u64().unwrap() as i64;
-    let den_raw = b.num.as_i64().unwrap() * a.den.as_u64().unwrap() as i64;
-    if den_raw < 0 {
-        RatWitness::new(-num, (-den_raw) as u64)
+    // (a_num / a_den) / (b_num / b_den) = (a_num * b_den) / (a_den * b_num)
+    let num = a.num.value.mul(&OurBigInt::from_bignat(crate::Sign::Positive, b.den.magnitude.clone()));
+    let den_int = b.num.value.mul(&OurBigInt::from_bignat(crate::Sign::Positive, a.den.magnitude.clone()));
+    // move sign into num, den must be positive
+    let (final_num, final_den) = if matches!(den_int.sign, crate::Sign::Negative) {
+        (num.negate(), den_int.magnitude)
     } else {
-        RatWitness::new(num, den_raw as u64)
-    }
+        (num, den_int.magnitude)
+    };
+    RatWitness::new_big(final_num, final_den)
 }
 
 // rat.normalize (exposed as standalone — RatWitness::new already normalizes,
@@ -488,11 +519,12 @@ pub fn rat_normalize(num: i64, den: i64) -> Result<RatWitness, ArithmeticError> 
     if den == 0 {
         return Err(ArithmeticError::ZeroDenominator);
     }
-    if den < 0 {
-        RatWitness::new(-num, (-den) as u64)
+    let (n, d) = if den < 0 {
+        (bignum::BigInt::from_i64(-num), bignum::BigNat::from_u64((-den) as u64))
     } else {
-        RatWitness::new(num, den as u64)
-    }
+        (bignum::BigInt::from_i64(num), bignum::BigNat::from_u64(den as u64))
+    };
+    RatWitness::new_big(n, d)
 }
 
 // ── Section 11: Shadow / Strict Execution ────────────────────────────────────
@@ -726,15 +758,9 @@ pub fn decode_nat(bytes: &[u8]) -> Result<NatWitness, DecodeError> {
     }
 
     // Reconstruct value
-    let mut value: u64 = 0;
-    for &b in mag {
-        value = value.checked_shl(8)
-            .ok_or(DecodeError::NonMinimalEncoding)?
-            .checked_add(b as u64)
-            .ok_or(DecodeError::NonMinimalEncoding)?;
-    }
+    let value = BigNat::from_be_bytes(mag);
 
-    let witness = NatWitness::new(BigUint::from(value));
+    let witness = NatWitness::new(value);
 
     // Round-trip check
     if witness.canon != bytes {
@@ -781,9 +807,9 @@ pub fn decode_int(bytes: &[u8]) -> Result<IntWitness, DecodeError> {
     }
 
     let witness = IntWitness::new(match sign {
-        Sign::Zero => BigInt::from(0),
-        Sign::Positive => BigInt::from(nat.as_u64().unwrap() as i64),
-        Sign::Negative => BigInt::from((nat.as_u64().unwrap() as i64).wrapping_neg()),
+        Sign::Zero => OurBigInt::zero(),
+        Sign::Positive => OurBigInt::from_bignat(Sign::Positive, nat.magnitude.clone()),
+        Sign::Negative => OurBigInt::from_bignat(Sign::Negative, nat.magnitude.clone()),
     });
 
     // Round-trip check
@@ -822,22 +848,22 @@ pub fn decode_rat(bytes: &[u8]) -> Result<RatWitness, DecodeError> {
     let den = decode_nat(nat_bytes)?;
 
     // Zero denominator
-    if den.as_u64().unwrap() == 0 {
+    if den.magnitude.is_zero() {
         return Err(DecodeError::ZeroDenominator);
     }
 
     // Alternate zero rational: if num is zero, den must be 1
-    if num.as_i64().unwrap() == 0 && den.as_u64().unwrap() != 1 {
+    if num.value.is_zero() && den.magnitude != BigNat::from_u64(1) {
         return Err(DecodeError::AlternateZeroRational);
     }
 
     // Must be reduced
-    let g = gcd_u64(num.value.abs().to_u64().unwrap(), den.as_u64().unwrap());
-    if g > 1 {
+    let g = BigNat::gcd(num.value.magnitude.clone(), den.magnitude.clone());
+    if g != bignum::BigNat::from_u64(0) && g != BigNat::from_u64(1) {
         return Err(DecodeError::UnreducedRational);
     }
 
-    let witness = RatWitness::new(num.as_i64().unwrap(), den.as_u64().unwrap())
+    let witness = RatWitness::new_big(num.value.clone(), den.magnitude.clone())
         .map_err(|_| DecodeError::ZeroDenominator)?;
 
     // Round-trip check
@@ -879,7 +905,7 @@ mod tests {
     #[test]
     fn nat_canon_is_stable() {
         let n = NatWitness::from_u64(10);
-        let expected = encode_nat(&BigUint::from(10u64));
+        let expected = encode_nat(&BigNat::from_u64(10));
         println!("
 ── nat_canon_is_stable ──────────────────────────");
         println!("  value       : {}", n.as_u64().unwrap());
@@ -898,7 +924,7 @@ mod tests {
         println!("
 ── rat_reduces ──────────────────────────────────");
         println!("  input       : 6/8");
-        println!("  reduced num : {} (sign={})", r.num.value.abs().to_u64().unwrap(), if r.num.value.is_zero() { "zero" } else if r.num.value.sign() == NumSign::Minus { "neg" } else { "pos" });
+        println!("  reduced num : {} (sign={})", r.num.value.abs().to_u64().unwrap(), if r.num.value.is_zero() { "zero" } else if matches!(r.num.value.sign, crate::Sign::Negative) { "neg" } else { "pos" });
         println!("  reduced den : {}", r.den.as_u64().unwrap());
         println!("  canon bytes : {:02x?}", r.canon);
         println!("  digest      : {}", hex_digest(&r.digest));
@@ -934,17 +960,17 @@ mod tests {
         println!("  nat.eq(10,10)       : {}", nat_eq(&a, &NatWitness::from_u64(10)));
         println!("  nat.eq(10,4)        : {}", nat_eq(&a, &b));
         println!("  nat.cmp(10,4)       : {:?}", nat_cmp(&a, &b));
-        println!("  nat.add(10,4)       : {}", nat_add(&a, &b).unwrap().as_u64().unwrap());
+        println!("  nat.add(10,4)       : {}", nat_add(&a, &b).as_u64().unwrap());
         println!("  nat.sub_checked(10,4): {}", nat_sub_checked(&a, &b).unwrap().as_u64().unwrap());
         println!("  nat.sub_checked(4,10): {:?}", nat_sub_checked(&b, &a).unwrap_err());
-        println!("  nat.mul(10,4)       : {}", nat_mul(&a, &b).unwrap().as_u64().unwrap());
+        println!("  nat.mul(10,4)       : {}", nat_mul(&a, &b).as_u64().unwrap());
         assert!(nat_eq(&a, &NatWitness::from_u64(10)));
         assert!(!nat_eq(&a, &b));
         assert_eq!(nat_cmp(&a, &b), std::cmp::Ordering::Greater);
-        assert_eq!(nat_add(&a, &b).unwrap().as_u64().unwrap(), 14);
+        assert_eq!(nat_add(&a, &b).as_u64().unwrap(), 14);
         assert_eq!(nat_sub_checked(&a, &b).unwrap().as_u64().unwrap(), 6);
         assert_eq!(nat_sub_checked(&b, &a).unwrap_err(), ArithmeticError::NegativeNatResult);
-        assert_eq!(nat_mul(&a, &b).unwrap().as_u64().unwrap(), 40);
+        assert_eq!(nat_mul(&a, &b).as_u64().unwrap(), 40);
     }
 
     #[test]
@@ -961,7 +987,7 @@ mod tests {
         println!("  int.mul(10,-4) : {}", int_mul(&a, &b).unwrap().as_i64().unwrap());
         println!("  int.neg(10)    : {}", int_neg(&a).as_i64().unwrap());
         println!("  int.neg(0)     : {}", int_neg(&z).as_i64().unwrap());
-        println!("  neg(0) sign    : {}", if int_neg(&z).value.is_zero() { "Zero" } else if int_neg(&z).value.sign() == NumSign::Minus { "Negative" } else { "Positive" });
+        println!("  neg(0) sign    : {}", if int_neg(&z).value.is_zero() { "Zero" } else if matches!(int_neg(&z).value.sign, crate::Sign::Negative) { "Negative" } else { "Positive" });
         assert!(int_eq(&a, &IntWitness::from_i64(10)));
         assert!(!int_eq(&a, &b));
         assert_eq!(int_cmp(&a, &b), std::cmp::Ordering::Greater);
@@ -1010,11 +1036,11 @@ mod tests {
 
         let max_nat = NatWitness::from_u64(u64::MAX);
         let one_nat = NatWitness::from_u64(1);
-        let sum_nat = nat_add(&max_nat, &one_nat).unwrap();
+        let sum_nat = nat_add(&max_nat, &one_nat);
         println!("  nat.add(u64::MAX, 1)      : {}", sum_nat.magnitude);
         assert_eq!(sum_nat.magnitude.to_string(), "18446744073709551616");
 
-        let prod_nat = nat_mul(&max_nat, &NatWitness::from_u64(2)).unwrap();
+        let prod_nat = nat_mul(&max_nat, &NatWitness::from_u64(2));
         println!("  nat.mul(u64::MAX, 2)      : {}", prod_nat.magnitude);
         assert_eq!(prod_nat.magnitude.to_string(), "36893488147419103230");
 
@@ -1169,20 +1195,20 @@ mod tests {
 
         // Round-trips
         for n in [0u64, 1, 10, 255, 256, 65535, u64::MAX] {
-            let enc = encode_nat(&BigUint::from(n));
+            let enc = encode_nat(&BigNat::from_u64(n));
             let dec = decode_nat(&enc).unwrap();
             assert_eq!(dec.as_u64().unwrap(), n, "round-trip failed for {n}");
             println!("  round-trip {:>20} : ok", n);
         }
 
         // Wrong tag
-        let mut bad = encode_nat(&BigUint::from(10u64));
+        let mut bad = encode_nat(&BigNat::from_u64(10));
         bad[0] = 0x02;
         assert_eq!(decode_nat(&bad).unwrap_err(), DecodeError::WrongTag { expected: 0x01, got: 0x02 });
         println!("  wrong tag              : {:?}", DecodeError::WrongTag { expected: 0x01, got: 0x02 });
 
         // Truncated
-        let enc = encode_nat(&BigUint::from(10u64));
+        let enc = encode_nat(&BigNat::from_u64(10));
         assert_eq!(decode_nat(&enc[..3]).unwrap_err(), DecodeError::UnexpectedEof);
         println!("  truncated              : {:?}", DecodeError::UnexpectedEof);
 
@@ -1193,7 +1219,7 @@ mod tests {
         println!("  non-minimal leading 0  : {:?}", DecodeError::NonMinimalEncoding);
 
         // Trailing bytes
-        let mut trailing = encode_nat(&BigUint::from(10u64));
+        let mut trailing = encode_nat(&BigNat::from_u64(10));
         trailing.push(0xFF);
         assert_eq!(decode_nat(&trailing).unwrap_err(), DecodeError::TrailingBytes);
         println!("  trailing bytes         : {:?}", DecodeError::TrailingBytes);
@@ -1230,7 +1256,7 @@ mod tests {
         println!("  invalid sign byte      : {:?}", DecodeError::InvalidSignByte(0x05));
 
         // Negative zero: [0x02, 0x02, <Nat(0)>]
-        let nat_zero = encode_nat(&BigUint::from(0u64));
+        let nat_zero = encode_nat(&BigNat::zero());
         let mut neg_zero = vec![0x02, 0x02];
         neg_zero.extend_from_slice(&nat_zero);
         assert_eq!(decode_int(&neg_zero).unwrap_err(), DecodeError::NegativeZero);

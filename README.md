@@ -1,6 +1,6 @@
 # FARD Math Primitives
 
-Structural arithmetic kernel for FARD — Rust-first implementation of `ArithCore v0.2.0`.
+Structural arithmetic kernel for FARD — Rust-first implementation of `ArithCore v0.3.0`.
 
 ---
 
@@ -9,8 +9,9 @@ Structural arithmetic kernel for FARD — Rust-first implementation of `ArithCor
 **ArithCore v0.1.0** — complete (canonical witnesses, receipts, Merkle, replay)
 **ArithCore v0.1.1** — complete (canonical decode enforcement)
 **ArithCore v0.2.0** — complete (first-principles unbounded arithmetic, no external bignum)
+**ArithCore v0.3.0** — complete (full exact op closure)
 
-23/23 tests passing. Run with:
+26/26 tests passing. Run with:
 
     cargo t
 
@@ -47,10 +48,11 @@ Design principle: **the witness is truth — the machine value is a cache**
 Byte-stable, unique, invertible, deterministic across machines.
 decode(encode(x)) == x verified for full value range including beyond machine bounds.
 
-### Operation contracts
-- nat: eq, cmp, add, sub_checked, mul
-- int: eq, cmp, add, sub, mul, neg
-- rat: eq, cmp, add, sub, mul, div_checked, normalize
+### Operation contracts (v0.3.0)
+- nat: eq, cmp, add, sub_checked, mul, divrem, pow
+- int: eq, cmp, add, sub, mul, neg, abs, signum, divrem (Euclidean), pow
+- rat: eq, cmp, add, sub, mul, div_checked, normalize, abs, signum, floor, ceil, trunc, pow
+- Display implemented for NatWitness, IntWitness, RatWitness
 
 ### Overflow policy (v0.2.0)
 - Structural overflow is impossible — BigNat/BigInt are unbounded
@@ -95,7 +97,7 @@ decode(encode(x)) == x verified for full value range including beyond machine bo
 
 ---
 
-## Test coverage (23 tests)
+## Test coverage (26 tests)
 
 | Test                               | What it proves                                    |
 |------------------------------------|---------------------------------------------------|
@@ -122,6 +124,9 @@ decode(encode(x)) == x verified for full value range including beyond machine bo
 | bignat_gcd                         | BigNat gcd correctness                            |
 | bignat_be_bytes_roundtrip          | BigNat byte encoding round-trips                  |
 | bigint_arithmetic                  | BigInt add/sub/mul/neg/cmp beyond i64             |
+| nat_divrem_and_pow                 | nat.divrem, nat.pow including unbounded           |
+| int_divrem_abs_signum_pow          | int.divrem Euclidean, abs, signum, pow            |
+| rat_floor_ceil_trunc_abs_signum_pow| rat rounding, abs, signum, pow                    |
 
 ---
 
@@ -156,8 +161,8 @@ decode(encode(x)) == x verified for full value range including beyond machine bo
 | 1 — Rust kernel prototype          | complete   |
 | 1.1 — Canonical decode enforcement | complete   |
 | 2 — Unbounded Nat/Int/Rat          | complete   |
-| 3 — Full exact op closure          | next       |
-| 4 — Stable ABI                     | pending    |
+| 3 — Full exact op closure          | complete   |
+| 4 — Stable ABI                     | next       |
 | 5 — Runtime integration            | pending    |
 | 6 — Std rebase                     | pending    |
 | 7 — Strict numeric lane            | pending    |
@@ -170,9 +175,6 @@ decode(encode(x)) == x verified for full value range including beyond machine bo
 
 ## Not yet implemented
 
-- nat.divrem, int.divrem, int.abs, int.signum
-- rat.floor, rat.ceil, rat.trunc, rat.abs, rat.signum
-- Exponentiation for Nat/Int/Rat
 - Receipt schema validation and deserialization enforcement
 - Merkle inclusion proof generation
 - Serialized artifact output for blocks

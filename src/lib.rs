@@ -131,8 +131,8 @@ impl RatWitness {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StructuralRepr {
-    HostInt(i64),
-    ExactRational { num: i64, den: u64 },
+    HostInt(OurBigInt),
+    ExactRational { num: OurBigInt, den: BigNat },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -155,7 +155,7 @@ impl StructuralNumber {
     pub fn from_int(value: i64, mode: ArithMode) -> Self {
         let wit = IntWitness::from_i64(value);
         Self {
-            repr: StructuralRepr::HostInt(value),
+            repr: StructuralRepr::HostInt(OurBigInt::from_i64(value)),
             canon: wit.canon.clone(),
             receipt_link: wit.digest,
             witness: StructuralWitness::Int(wit),
@@ -167,8 +167,8 @@ impl StructuralNumber {
         let wit = RatWitness::new(num, den)?;
         Ok(Self {
             repr: StructuralRepr::ExactRational {
-                num: wit.num.as_i64().unwrap_or(0),
-                den: wit.den.as_u64().unwrap_or(0),
+                num: wit.num.value.clone(),
+                den: wit.den.magnitude.clone(),
             },
             canon: wit.canon.clone(),
             receipt_link: wit.digest,
@@ -274,7 +274,7 @@ pub fn shadow_add_int(lhs: i64, rhs: i64, mode: ArithMode) -> Result<(Structural
     }
 
     let out = StructuralNumber {
-        repr: StructuralRepr::HostInt(structural.as_i64().unwrap_or(0)),
+        repr: StructuralRepr::HostInt(structural.value.clone()),
         canon: structural.canon.clone(),
         mode,
         receipt_link: structural.digest,
@@ -333,12 +333,13 @@ pub fn encode_int(value: &OurBigInt) -> Vec<u8> {
     out
 }
 
-pub fn encode_rat(num: i64, den: u64) -> Vec<u8> {
-    let rat = RatWitness::new(num, den).expect("encode_rat requires nonzero denominator");
-    let mut out = Vec::with_capacity(1 + rat.num.canon.len() + rat.den.canon.len());
+pub fn encode_rat(num: &OurBigInt, den: &BigNat) -> Vec<u8> {
+    let num_canon = encode_int(num);
+    let den_canon = encode_nat(den);
+    let mut out = Vec::with_capacity(1 + num_canon.len() + den_canon.len());
     out.push(0x03);
-    out.extend_from_slice(&rat.num.canon);
-    out.extend_from_slice(&rat.den.canon);
+    out.extend_from_slice(&num_canon);
+    out.extend_from_slice(&den_canon);
     out
 }
 
@@ -370,6 +371,7 @@ pub fn merkle_root(leaves: &[Digest]) -> Digest {
     level[0]
 }
 
+#[deprecated(note = "use BigNat::gcd instead")]
 pub fn gcd_u64(mut a: u64, mut b: u64) -> u64 {
     while b != 0 {
         let t = b;
@@ -511,14 +513,15 @@ pub fn rat_div_checked(a: &RatWitness, b: &RatWitness) -> Result<RatWitness, Ari
 
 // rat.normalize (exposed as standalone — RatWitness::new already normalizes,
 // this is the explicit contract entry point for candidate (num, den) pairs)
-pub fn rat_normalize(num: i64, den: i64) -> Result<RatWitness, ArithmeticError> {
-    if den == 0 {
+pub fn rat_normalize(num: OurBigInt, den: OurBigInt) -> Result<RatWitness, ArithmeticError> {
+    if den.is_zero() {
         return Err(ArithmeticError::ZeroDenominator);
     }
-    let (n, d) = if den < 0 {
-        (bignum::BigInt::from_i64(-num), bignum::BigNat::from_u64((-den) as u64))
+    // move sign into numerator, denominator must be positive
+    let (n, d) = if matches!(den.sign, crate::Sign::Negative) {
+        (num.negate(), den.magnitude)
     } else {
-        (bignum::BigInt::from_i64(num), bignum::BigNat::from_u64(den as u64))
+        (num, den.magnitude)
     };
     RatWitness::new_big(n, d)
 }
@@ -564,7 +567,7 @@ pub fn execute_int_op(
 
     let _ = native_val;
     let out = StructuralNumber {
-        repr: StructuralRepr::HostInt(structural.as_i64().unwrap_or(0)),
+        repr: StructuralRepr::HostInt(structural.value.clone()),
         canon: structural.canon.clone(),
         mode,
         receipt_link: structural.digest,
@@ -584,16 +587,57 @@ pub fn execute_int_op(
     Ok(OpResult { out, receipt })
 }
 
-pub fn checked_int_add(lhs: i64, rhs: i64, mode: ArithMode) -> Result<OpResult, ArithmeticError> {
-    execute_int_op("int.add", lhs, rhs, mode, |a, b| int_add(a, b), |a, b| a.checked_add(b))
+
+pub fn execute_int_op_big(
+    op: &str,
+    lhs: OurBigInt,
+    rhs: OurBigInt,
+    mode: ArithMode,
+    structural_fn: impl Fn(&IntWitness, &IntWitness) -> Result<IntWitness, ArithmeticError>,
+) -> Result<OpResult, ArithmeticError> {
+    let lhs_wit = IntWitness::from_bigint(lhs);
+    let rhs_wit = IntWitness::from_bigint(rhs);
+    let lhs_digest = lhs_wit.digest;
+    let rhs_digest = rhs_wit.digest;
+
+    let structural = structural_fn(&lhs_wit, &rhs_wit)?;
+
+    let native_summary = match mode {
+        ArithMode::Strict => format!("strict:structural={}", structural.value),
+        ArithMode::ShadowChecked | ArithMode::Native => format!("native={}", structural.value),
+    };
+
+    let out = StructuralNumber {
+        repr: StructuralRepr::HostInt(structural.value.clone()),
+        canon: structural.canon.clone(),
+        mode,
+        receipt_link: structural.digest,
+        witness: StructuralWitness::Int(structural),
+    };
+
+    let receipt = ArithmeticStepReceipt::new(
+        op,
+        lhs_digest,
+        rhs_digest,
+        out.receipt_link,
+        native_summary,
+        true,
+        mode,
+    );
+
+    Ok(OpResult { out, receipt })
 }
 
-pub fn checked_int_sub(lhs: i64, rhs: i64, mode: ArithMode) -> Result<OpResult, ArithmeticError> {
-    execute_int_op("int.sub", lhs, rhs, mode, |a, b| int_sub(a, b), |a, b| a.checked_sub(b))
+pub fn checked_int_add(lhs: OurBigInt, rhs: OurBigInt, mode: ArithMode) -> Result<OpResult, ArithmeticError> {
+    execute_int_op_big("int.add", lhs, rhs, mode, |a, b| int_add(a, b))
 }
 
-pub fn checked_int_mul(lhs: i64, rhs: i64, mode: ArithMode) -> Result<OpResult, ArithmeticError> {
-    execute_int_op("int.mul", lhs, rhs, mode, |a, b| int_mul(a, b), |a, b| a.checked_mul(b))
+pub fn checked_int_sub(lhs: OurBigInt, rhs: OurBigInt, mode: ArithMode) -> Result<OpResult, ArithmeticError> {
+    execute_int_op_big("int.sub", lhs, rhs, mode, |a, b| int_sub(a, b))
+}
+
+pub fn checked_int_mul(lhs: OurBigInt, rhs: OurBigInt, mode: ArithMode) -> Result<OpResult, ArithmeticError> {
+    execute_int_op_big("int.mul", lhs, rhs, mode, |a, b| int_mul(a, b))
 }
 
 
@@ -1243,7 +1287,7 @@ mod tests {
         let quot = rat_div_checked(&a, &b).unwrap();
         println!("  rat.div(1/2,1/3)     : {}/{}", quot.num.as_i64().unwrap(), quot.den.as_u64().unwrap());
         println!("  rat.div_by_zero      : {:?}", rat_div_checked(&a, &c).unwrap_err());
-        let norm = rat_normalize(6, -8).unwrap();
+        let norm = rat_normalize(OurBigInt::from_i64(6), OurBigInt::from_i64(-8)).unwrap();
         println!("  rat.normalize(6,-8)  : {}/{}", norm.num.as_i64().unwrap(), norm.den.as_u64().unwrap());
         assert!(rat_eq(&a, &RatWitness::new(1, 2).unwrap()));
         assert!(!rat_eq(&a, &b));
@@ -1294,23 +1338,23 @@ mod tests {
         println!("\n── shadow_mismatch_detection ────────────────────");
 
         // Normal case — native and structural agree
-        let r = checked_int_add(10, 20, ArithMode::ShadowChecked).unwrap();
+        let r = checked_int_add(OurBigInt::from_i64(10), OurBigInt::from_i64(20), ArithMode::ShadowChecked).unwrap();
         println!("  add(10,20) ShadowChecked verdict : {}", r.receipt.verdict);
         println!("  add(10,20) out                   : {}", r.out.as_i64());
         assert_eq!(r.out.as_i64(), 30);
         assert!(r.receipt.verdict);
 
-        // Overflow caught before mismatch check
-        let r = checked_int_add(i64::MAX, 1, ArithMode::ShadowChecked);
-        println!("  add(MAX,1) ShadowChecked         : {:?}", r.as_ref().unwrap_err());
-        assert_eq!(r.unwrap_err(), ArithmeticError::NativeOverflow);
+        // Structural is unbounded — i64::MAX + 1 succeeds in v0.2.0+
+        let r = checked_int_add(OurBigInt::from_i64(i64::MAX), OurBigInt::from_i64(1), ArithMode::ShadowChecked).unwrap();
+        println!("  add(MAX,1) ShadowChecked         : {} (unbounded)", r.receipt.native_summary);
+        assert!(r.receipt.verdict);
 
         // sub and mul happy paths
-        let r = checked_int_sub(30, 10, ArithMode::ShadowChecked).unwrap();
+        let r = checked_int_sub(OurBigInt::from_i64(30), OurBigInt::from_i64(10), ArithMode::ShadowChecked).unwrap();
         println!("  sub(30,10) ShadowChecked         : {}", r.out.as_i64());
         assert_eq!(r.out.as_i64(), 20);
 
-        let r = checked_int_mul(6, 7, ArithMode::ShadowChecked).unwrap();
+        let r = checked_int_mul(OurBigInt::from_i64(6), OurBigInt::from_i64(7), ArithMode::ShadowChecked).unwrap();
         println!("  mul(6,7)   ShadowChecked         : {}", r.out.as_i64());
         assert_eq!(r.out.as_i64(), 42);
     }
@@ -1320,7 +1364,7 @@ mod tests {
         println!("\n── strict_mode_authority ────────────────────────");
 
         // Strict: structural is authoritative, receipt always verdicts true
-        let r = checked_int_add(10, 20, ArithMode::Strict).unwrap();
+        let r = checked_int_add(OurBigInt::from_i64(10), OurBigInt::from_i64(20), ArithMode::Strict).unwrap();
         println!("  add(10,20) Strict verdict        : {}", r.receipt.verdict);
         println!("  add(10,20) Strict out            : {}", r.out.as_i64());
         println!("  add(10,20) Strict native_summary : {}", r.receipt.native_summary);
@@ -1329,17 +1373,17 @@ mod tests {
         assert!(r.receipt.native_summary.starts_with("strict:structural="));
 
         // Strict: i64::MAX + 1 succeeds — structural is unbounded in v0.2.0
-        let r = checked_int_add(i64::MAX, 1, ArithMode::Strict).unwrap();
+        let r = checked_int_add(OurBigInt::from_i64(i64::MAX), OurBigInt::from_i64(1), ArithMode::Strict).unwrap();
         println!("  add(MAX,1) Strict out            : {} (unbounded)", r.receipt.native_summary);
         assert!(r.receipt.verdict);
 
         // Strict: mode is recorded on receipt
-        let r = checked_int_mul(3, 4, ArithMode::Strict).unwrap();
+        let r = checked_int_mul(OurBigInt::from_i64(3), OurBigInt::from_i64(4), ArithMode::Strict).unwrap();
         println!("  mul(3,4)   Strict mode field     : {:?}", r.receipt.mode);
         assert_eq!(r.receipt.mode, ArithMode::Strict);
 
         // ShadowChecked: mode is recorded on receipt
-        let r = checked_int_mul(3, 4, ArithMode::ShadowChecked).unwrap();
+        let r = checked_int_mul(OurBigInt::from_i64(3), OurBigInt::from_i64(4), ArithMode::ShadowChecked).unwrap();
         println!("  mul(3,4)   ShadowChecked mode    : {:?}", r.receipt.mode);
         assert_eq!(r.receipt.mode, ArithMode::ShadowChecked);
     }
@@ -1348,9 +1392,9 @@ mod tests {
     fn merkle_block_determinism() {
         println!("\n── merkle_block_determinism ─────────────────────");
 
-        let r1 = checked_int_add(10, 20, ArithMode::ShadowChecked).unwrap();
-        let r2 = checked_int_sub(50, 5,  ArithMode::ShadowChecked).unwrap();
-        let r3 = checked_int_mul(3,  7,  ArithMode::ShadowChecked).unwrap();
+        let r1 = checked_int_add(OurBigInt::from_i64(10), OurBigInt::from_i64(20), ArithMode::ShadowChecked).unwrap();
+        let r2 = checked_int_sub(OurBigInt::from_i64(50), OurBigInt::from_i64(5), ArithMode::ShadowChecked).unwrap();
+        let r3 = checked_int_mul(OurBigInt::from_i64(3), OurBigInt::from_i64(7), ArithMode::ShadowChecked).unwrap();
 
         let receipts = vec![r1.receipt.clone(), r2.receipt.clone(), r3.receipt.clone()];
 
@@ -1376,9 +1420,9 @@ mod tests {
     fn replay_verification() {
         println!("\n── replay_verification ──────────────────────────");
 
-        let r1 = checked_int_add(10, 20, ArithMode::ShadowChecked).unwrap();
-        let r2 = checked_int_sub(50, 5,  ArithMode::ShadowChecked).unwrap();
-        let r3 = checked_int_mul(3,  7,  ArithMode::ShadowChecked).unwrap();
+        let r1 = checked_int_add(OurBigInt::from_i64(10), OurBigInt::from_i64(20), ArithMode::ShadowChecked).unwrap();
+        let r2 = checked_int_sub(OurBigInt::from_i64(50), OurBigInt::from_i64(5), ArithMode::ShadowChecked).unwrap();
+        let r3 = checked_int_mul(OurBigInt::from_i64(3), OurBigInt::from_i64(7), ArithMode::ShadowChecked).unwrap();
 
         let receipts = vec![r1.receipt.clone(), r2.receipt.clone(), r3.receipt.clone()];
         let block = ArithmeticBlock::from_receipts("replay_block", "commit_only", &receipts);

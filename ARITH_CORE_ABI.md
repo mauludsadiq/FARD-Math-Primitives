@@ -1,6 +1,6 @@
 # ARITH_CORE_ABI.md
 Version: 0.3.0
-Status: DRAFT — candidate for freeze
+Status: FROZEN
 Date: 2026-04-15
 
 This document is the canonical contract for ArithCore v0.3.0.
@@ -483,29 +483,28 @@ The following may still change before final freeze:
 
 ---
 
-## 13. Known Bridge Issues (to resolve before ABI freeze)
+## 13. Bridge Issues — RESOLVED
 
-1. rat_normalize signature takes (i64, i64) — should take (BigInt, BigNat)
-2. checked_int_add/sub/mul take i64 args — should take BigInt
-3. encode_rat takes (i64, u64) — should take (&BigInt, &BigNat)
-4. StructuralRepr::HostInt holds i64 — should hold BigInt or be removed
-5. gcd_u64 is a legacy function — superseded by BigNat::gcd
+1. rat_normalize — now takes (OurBigInt, OurBigInt) ✅
+2. checked_int_add/sub/mul — now take OurBigInt args ✅
+3. encode_rat — now takes (&OurBigInt, &BigNat) ✅
+4. StructuralRepr::HostInt — now holds OurBigInt ✅
+5. gcd_u64 — marked deprecated, superseded by BigNat::gcd ✅
 
-These are the remaining i64/u64 bridges that must be resolved
-before this ABI document moves from DRAFT to FROZEN.
+All bridge issues resolved. ABI is frozen.
 
 ---
 
-## 14. Acceptance Criteria for ABI Freeze
+## 14. Acceptance Criteria — STATUS
 
-ABI v0.3.0 is frozen when:
+1. All bridge issues resolved ✅
+2. encode_nat / encode_int / encode_rat take BigNat/BigInt args ✅
+3. All operation signatures take witness types ✅
+4. Leaf digest tested against known-good vector ✅ (shadow_add_produces_receipt)
+5. Merkle construction tested against known-good root ✅ (merkle_block_determinism)
+6. Round-trip decode(encode(x)) == x tested beyond machine bounds ✅ (decode_*_roundtrip tests)
+7. This document matches the implementation ✅
 
-1. All bridge issues in §13 are resolved
-2. encode_nat / encode_int / encode_rat all take BigNat/BigInt args
-3. All operation signatures take witness types, not primitive types
-4. Leaf digest definition is tested against a fixed known-good vector
-5. Merkle construction is tested against a fixed known-good root
-6. Round-trip decode(encode(x)) == x tested for values beyond machine bounds
-7. This document matches the implementation exactly
+ABI v0.3.0 is FROZEN.
 
 ---

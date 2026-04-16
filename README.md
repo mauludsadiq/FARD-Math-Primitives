@@ -54,6 +54,14 @@ decode(encode(x)) == x verified for full value range including beyond machine bo
 - rat: eq, cmp, add, sub, mul, div_checked, normalize, abs, signum, floor, ceil, trunc, pow
 - Display implemented for NatWitness, IntWitness, RatWitness
 
+### FARD std/bigint rebase (Phase 6)
+ArithCore is now the arithmetic authority for all `std/bigint` operations in FARD v0.5.
+- `crates/arith-core` added to FARD workspace
+- All BigAdd/Sub/Mul/Div/Mod/Pow/Eq/Lt/Gt route through ArithCore BigInt
+- Val::Big interface unchanged — substitution transparent to FARD language
+- 12/12 bigint tests passing
+- See FARD repo: github.com/mauludsadiq/FARD
+
 ### Runtime integration layer (src/runtime.rs)
 The stable entry point the FARD runtime will call into. Does not touch FARD itself.
 
@@ -176,8 +184,8 @@ The stable entry point the FARD runtime will call into. Does not touch FARD itse
 | 3 — Full exact op closure          | complete   |
 | 4 — Stable ABI                     | complete   |
 | 5 — Runtime integration            | complete   |
-| 6 — Std rebase                     | next       |
-| 7 — Strict numeric lane            | pending    |
+| 6 — Std rebase                     | complete   |
+| 7 — Strict numeric lane            | next       |
 | 8 — Decimal/fixed-point            | pending    |
 | 9 — ApproxCore                     | pending    |
 | 10 — Compiler unification          | pending    |

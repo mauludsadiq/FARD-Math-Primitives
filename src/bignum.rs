@@ -311,7 +311,14 @@ impl BigInt {
         match self.sign {
             Sign::Zero => Some(0),
             Sign::Positive => self.magnitude.to_u64().and_then(|n| i64::try_from(n).ok()),
-            Sign::Negative => self.magnitude.to_u64().map(|n| (n as i64).wrapping_neg()),
+            Sign::Negative => self.magnitude.to_u64().and_then(|n| {
+                // Only valid if n <= 2^63 (i64::MIN is -2^63, magnitude 2^63)
+                if n <= (i64::MAX as u64 + 1) {
+                    Some(0i64.wrapping_sub(n as i64))
+                } else {
+                    None
+                }
+            }),
         }
     }
 }

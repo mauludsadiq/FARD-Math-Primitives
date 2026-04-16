@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as ShaDigestTrait, Sha256};
-use std::cmp::Ordering;
 use std::fmt;
 use crate::bignum::{BigNat, BigInt as OurBigInt};
 
@@ -275,7 +274,7 @@ pub fn shadow_add_int(lhs: i64, rhs: i64, mode: ArithMode) -> Result<(Structural
     }
 
     let out = StructuralNumber {
-        repr: StructuralRepr::HostInt(structural.as_i64().unwrap()),
+        repr: StructuralRepr::HostInt(structural.as_i64().unwrap_or(0)),
         canon: structural.canon.clone(),
         mode,
         receipt_link: structural.digest,
@@ -433,30 +432,27 @@ pub fn int_eq(a: &IntWitness, b: &IntWitness) -> bool {
 
 // int.cmp
 pub fn int_cmp(a: &IntWitness, b: &IntWitness) -> std::cmp::Ordering {
-    a.as_i64().unwrap().cmp(&b.as_i64().unwrap())
+    a.value.cmp_int(&b.value)
 }
 
 // int.add
 pub fn int_add(a: &IntWitness, b: &IntWitness) -> Result<IntWitness, ArithmeticError> {
-    let v = a.as_i64().unwrap().checked_add(b.as_i64().unwrap()).ok_or(ArithmeticError::NativeOverflow)?;
-    Ok(IntWitness::from_i64(v))
+    Ok(IntWitness::from_bigint(a.value.add(&b.value)))
 }
 
 // int.sub
 pub fn int_sub(a: &IntWitness, b: &IntWitness) -> Result<IntWitness, ArithmeticError> {
-    let v = a.as_i64().unwrap().checked_sub(b.as_i64().unwrap()).ok_or(ArithmeticError::NativeOverflow)?;
-    Ok(IntWitness::from_i64(v))
+    Ok(IntWitness::from_bigint(a.value.sub(&b.value)))
 }
 
 // int.mul
 pub fn int_mul(a: &IntWitness, b: &IntWitness) -> Result<IntWitness, ArithmeticError> {
-    let v = a.as_i64().unwrap().checked_mul(b.as_i64().unwrap()).ok_or(ArithmeticError::NativeOverflow)?;
-    Ok(IntWitness::from_i64(v))
+    Ok(IntWitness::from_bigint(a.value.mul(&b.value)))
 }
 
 // int.neg
 pub fn int_neg(a: &IntWitness) -> IntWitness {
-    IntWitness::from_i64(-a.as_i64().unwrap())
+    IntWitness::from_bigint(a.value.negate())
 }
 
 // rat.eq
@@ -553,8 +549,8 @@ pub fn execute_int_op(
     let (native_val, native_summary, verdict) = match mode {
         ArithMode::Strict => {
             // native is optional cache only — structural is authoritative
-            let summary = format!("strict:structural={}", structural.as_i64().unwrap());
-            (structural.as_i64().unwrap(), summary, true)
+            let summary = format!("strict:structural={}", structural.value);
+            (structural.as_i64().unwrap_or(0), summary, true)
         }
         ArithMode::ShadowChecked | ArithMode::Native => {
             let native = native_fn(lhs, rhs).ok_or(ArithmeticError::NativeOverflow)?;
@@ -568,7 +564,7 @@ pub fn execute_int_op(
 
     let _ = native_val;
     let out = StructuralNumber {
-        repr: StructuralRepr::HostInt(structural.as_i64().unwrap()),
+        repr: StructuralRepr::HostInt(structural.as_i64().unwrap_or(0)),
         canon: structural.canon.clone(),
         mode,
         receipt_link: structural.digest,
@@ -1048,19 +1044,19 @@ mod tests {
         let min_int = IntWitness::from_i64(i64::MIN);
         let one_int = IntWitness::from_i64(1);
 
-        let r = int_add(&max_int, &one_int);
-        println!("  int.add(i64::MAX, 1)      : {:?}", r.as_ref().unwrap_err());
-        assert_eq!(r.unwrap_err(), ArithmeticError::NativeOverflow);
+        let isum = int_add(&max_int, &one_int).unwrap();
+        println!("  int.add(i64::MAX, 1)      : {} (exceeds i64)", isum.value);
+        assert!(isum.as_i64().is_none());
 
-        let r = int_sub(&min_int, &one_int);
-        println!("  int.sub(i64::MIN, 1)      : {:?}", r.as_ref().unwrap_err());
-        assert_eq!(r.unwrap_err(), ArithmeticError::NativeOverflow);
+        let idiff = int_sub(&min_int, &one_int).unwrap();
+        println!("  int.sub(i64::MIN, 1)      : {} (below i64)", idiff.value);
+        assert!(idiff.as_i64().is_none());
 
-        let r = int_mul(&max_int, &IntWitness::from_i64(2));
-        println!("  int.mul(i64::MAX, 2)      : {:?}", r.as_ref().unwrap_err());
-        assert_eq!(r.unwrap_err(), ArithmeticError::NativeOverflow);
+        let iprod = int_mul(&max_int, &IntWitness::from_i64(2)).unwrap();
+        println!("  int.mul(i64::MAX, 2)      : {} (exceeds i64)", iprod.value);
+        assert!(iprod.as_i64().is_none());
 
-        println!("  all overflow paths → NativeOverflow ✓");
+        println!("  all large-value ops succeed — overflow is not a semantic event ✓");
     }
 
     #[test]
@@ -1102,10 +1098,10 @@ mod tests {
         assert!(r.receipt.verdict);
         assert!(r.receipt.native_summary.starts_with("strict:structural="));
 
-        // Strict: overflow in structural propagates as NativeOverflow
-        let r = checked_int_add(i64::MAX, 1, ArithMode::Strict);
-        println!("  add(MAX,1) Strict                : {:?}", r.as_ref().unwrap_err());
-        assert_eq!(r.unwrap_err(), ArithmeticError::NativeOverflow);
+        // Strict: i64::MAX + 1 succeeds — structural is unbounded in v0.2.0
+        let r = checked_int_add(i64::MAX, 1, ArithMode::Strict).unwrap();
+        println!("  add(MAX,1) Strict out            : {} (unbounded)", r.receipt.native_summary);
+        assert!(r.receipt.verdict);
 
         // Strict: mode is recorded on receipt
         let r = checked_int_mul(3, 4, ArithMode::Strict).unwrap();

@@ -1,17 +1,18 @@
 # FARD Math Primitives
 
-Structural arithmetic kernel for FARD — Rust-first implementation of `ArithCore v0.1.1`.
+Structural arithmetic kernel for FARD — Rust-first implementation of `ArithCore v0.2.0`.
 
 ---
 
 ## Status
 
-**ArithCore v0.1.0** — complete  
+**ArithCore v0.1.0** — complete (canonical witnesses, receipts, Merkle, replay)
 **ArithCore v0.1.1** — complete (canonical decode enforcement)
+**ArithCore v0.2.0** — complete (first-principles unbounded arithmetic, no external bignum)
 
-15/15 tests passing. Run with:
+23/23 tests passing. Run with:
 
-    cargo test
+    cargo t
 
 ---
 
@@ -27,30 +28,36 @@ Design principle: **the witness is truth — the machine value is a cache**
 
 ## Implemented
 
+### First-principles bignum (src/bignum.rs)
+- BigNat — unbounded natural, Vec<u32> limbs little-endian, u128 mul accumulator
+- BigInt — sign + BigNat magnitude
+- Operations: add, sub, mul, divrem, gcd, to/from be_bytes, cmp, Display
+- No external bignum dependencies — built from scratch as part of the kernel
+
 ### Value domains
-- `NatWitness` — natural number as canonical structural witness
-- `IntWitness` — signed integer as sign + magnitude over NatWitness
-- `RatWitness` — exact reduced rational, gcd(|num|, den) = 1 enforced
+- NatWitness — natural number backed by BigNat, structurally unbounded
+- IntWitness — signed integer backed by BigInt, structurally unbounded
+- RatWitness — exact reduced rational backed by BigInt/BigNat, gcd enforced
 
 ### Canonical encodings
-- `encode_nat` / `decode_nat` — [0x01, u32_be_len, mag_bytes...]
-- `encode_int` / `decode_int` — [0x02, sign_byte, nat_canon...]
-- `encode_rat` / `decode_rat` — [0x03, int_canon..., nat_canon...]
+- encode_nat / decode_nat — [0x01, u32_be_len, mag_bytes...]
+- encode_int / decode_int — [0x02, sign_byte, nat_canon...]
+- encode_rat / decode_rat — [0x03, int_canon..., nat_canon...]
 
 Byte-stable, unique, invertible, deterministic across machines.
-decode(encode(x)) == x verified for full value range including boundary values.
+decode(encode(x)) == x verified for full value range including beyond machine bounds.
 
 ### Operation contracts
 - nat: eq, cmp, add, sub_checked, mul
 - int: eq, cmp, add, sub, mul, neg
 - rat: eq, cmp, add, sub, mul, div_checked, normalize
 
-All ops return Result — overflow never silently alters semantics.
-
-### Overflow policy
-- Wrapping and saturating arithmetic forbidden as semantic truth
-- All ops use checked_* — overflow surfaces as ArithmeticError::NativeOverflow
-- i64::MIN negation handled via wrapping_neg() throughout
+### Overflow policy (v0.2.0)
+- Structural overflow is impossible — BigNat/BigInt are unbounded
+- Machine width is not semantic authority — it is a cache hint only
+- nat.add(u64::MAX, 1) = 18446744073709551616 — succeeds structurally
+- int.add(i64::MAX, 1) = 9223372036854775808 — succeeds structurally
+- NativeOverflow is retained only for the native shadow cache path
 
 ### Shadow / Strict execution
 - ShadowChecked — native and structural execute in parallel, mismatch is hard error
@@ -88,32 +95,40 @@ All ops return Result — overflow never silently alters semantics.
 
 ---
 
-## Test coverage
+## Test coverage (23 tests)
 
-| Test                              | What it proves                              |
-|-----------------------------------|---------------------------------------------|
-| nat_canon_is_stable               | Encoding stability                          |
-| nat_ops                           | All nat operation contracts                 |
-| int_ops                           | All int operation contracts                 |
-| rat_reduces                       | Rational normalization and gcd reduction    |
-| rat_ops                           | All rat operation contracts                 |
-| overflow_policy                   | All overflow boundaries -> NativeOverflow   |
-| shadow_add_produces_receipt       | Receipt determinism                         |
-| shadow_mismatch_detection         | Shadow mode catches divergence              |
-| strict_mode_authority             | Strict mode structural authority            |
-| merkle_root_is_deterministic      | Merkle stability                            |
-| merkle_block_determinism          | Block aggregation determinism               |
-| replay_verification               | Replay, tamper detection, policy mismatch   |
-| decode_nat_roundtrip_and_rejection| Nat decode contracts                        |
-| decode_int_roundtrip_and_rejection| Int decode contracts                        |
-| decode_rat_roundtrip_and_rejection| Rat decode contracts                        |
+| Test                               | What it proves                                    |
+|------------------------------------|---------------------------------------------------|
+| nat_canon_is_stable                | Encoding stability                                |
+| nat_ops                            | All nat operation contracts                       |
+| int_ops                            | All int operation contracts                       |
+| rat_reduces                        | Rational normalization and gcd reduction          |
+| rat_ops                            | All rat operation contracts                       |
+| overflow_policy                    | Large values succeed beyond machine bounds        |
+| shadow_add_produces_receipt        | Receipt determinism                               |
+| shadow_mismatch_detection          | Shadow mode catches divergence                    |
+| strict_mode_authority              | Strict mode structural authority                  |
+| merkle_root_is_deterministic       | Merkle stability                                  |
+| merkle_block_determinism           | Block aggregation determinism                     |
+| replay_verification                | Replay, tamper detection, policy mismatch         |
+| decode_nat_roundtrip_and_rejection | Nat decode contracts                              |
+| decode_int_roundtrip_and_rejection | Int decode contracts                              |
+| decode_rat_roundtrip_and_rejection | Rat decode contracts                              |
+| bignat_basics                      | BigNat zero, from_u64, is_zero, to_u64            |
+| bignat_add                         | BigNat addition including beyond u64              |
+| bignat_sub                         | BigNat subtraction and zero result                |
+| bignat_mul                         | BigNat multiplication including beyond u64        |
+| bignat_divrem                      | BigNat division and remainder                     |
+| bignat_gcd                         | BigNat gcd correctness                            |
+| bignat_be_bytes_roundtrip          | BigNat byte encoding round-trips                  |
+| bigint_arithmetic                  | BigInt add/sub/mul/neg/cmp beyond i64             |
 
 ---
 
 ## Build and run
 
     cargo build
-    cargo test
+    cargo t
     cargo run --example demo
 
 ---
@@ -122,12 +137,13 @@ All ops return Result — overflow never silently alters semantics.
 
     FARD Math Primitives/
     ├── .cargo/
-    │   └── config.toml        # cargo test command
+    │   └── config.toml        # cargo t alias
     ├── .vscode/
     ├── examples/
     │   └── demo.rs
     ├── src/
-    │   └── lib.rs             # entire kernel
+    │   ├── lib.rs             # kernel: witnesses, ops, receipts, replay, decode
+    │   └── bignum.rs          # first-principles BigNat and BigInt
     ├── Cargo.toml
     └── README.md
 
@@ -139,17 +155,8 @@ All ops return Result — overflow never silently alters semantics.
 |------------------------------------|------------|
 | 1 — Rust kernel prototype          | complete   |
 | 1.1 — Canonical decode enforcement | complete   |
-| 2 — Unbounded Nat/Int/Rat          | in progress |
-
-### Phase 2 Progress
-- ✅ NatWitness migrated to BigUint (unbounded naturals)
-- ✅ Nat arithmetic no longer overflows
-- ✅ IntWitness migrated to BigInt (unbounded integers)
-- 🔄 RatWitness still u64/i64-backed (bridge mode)
-
-Invariant:
-Nat and Int layers are now structurally unbounded; Rat remains in compatibility mode until migration completes.
-| 3 — Full exact op closure          | pending    |
+| 2 — Unbounded Nat/Int/Rat          | complete   |
+| 3 — Full exact op closure          | next       |
 | 4 — Stable ABI                     | pending    |
 | 5 — Runtime integration            | pending    |
 | 6 — Std rebase                     | pending    |
@@ -163,7 +170,9 @@ Nat and Int layers are now structurally unbounded; Rat remains in compatibility 
 
 ## Not yet implemented
 
-- Big integer support beyond u64/i64
+- nat.divrem, int.divrem, int.abs, int.signum
+- rat.floor, rat.ceil, rat.trunc, rat.abs, rat.signum
+- Exponentiation for Nat/Int/Rat
 - Receipt schema validation and deserialization enforcement
 - Merkle inclusion proof generation
 - Serialized artifact output for blocks
@@ -182,7 +191,8 @@ Nat and Int layers are now structurally unbounded; Rat remains in compatibility 
 - Canonical bytes before convenience formatting
 - Merkle commitments before full witness expansion
 - Deterministic normalization before optimization
-- checked_* arithmetic everywhere — no silent overflow
+- Structural arithmetic is unbounded — machine width is cache only
 - No negative zero
 - No unreduced rationals as outputs
 - Structural result always authoritative
+- No external bignum dependencies in the kernel

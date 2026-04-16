@@ -54,6 +54,13 @@ decode(encode(x)) == x verified for full value range including beyond machine bo
 - rat: eq, cmp, add, sub, mul, div_checked, normalize, abs, signum, floor, ceil, trunc, pow
 - Display implemented for NatWitness, IntWitness, RatWitness
 
+### Strict numeric lane (Phase 7)
+- `--strict-arith` flag on `fardrun run` — activates ArithCore strict mode
+- `// @strict_arith` pragma in FARD source — per-program opt-in, zero parser changes
+- ArithCore receipt block emitted to trace and `arith_receipt.json` on every strict run
+- Merkle root committed deterministically per session
+- Both paths verified: flag path and pragma path
+
 ### FARD std/bigint rebase (Phase 6)
 ArithCore is now the arithmetic authority for all `std/bigint` operations in FARD v0.5.
 - `crates/arith-core` added to FARD workspace
@@ -185,8 +192,8 @@ The stable entry point the FARD runtime will call into. Does not touch FARD itse
 | 4 — Stable ABI                     | complete   |
 | 5 — Runtime integration            | complete   |
 | 6 — Std rebase                     | complete   |
-| 7 — Strict numeric lane            | next       |
-| 8 — Decimal/fixed-point            | pending    |
+| 7 — Strict numeric lane            | complete   |
+| 8 — Decimal/fixed-point            | next       |
 | 9 — ApproxCore                     | pending    |
 | 10 — Compiler unification          | pending    |
 | 11 — FARD self-hosting             | pending    |
